@@ -12,6 +12,12 @@ default = []
 # enables this; dev builds leave it off so eprintln traces remain
 # visible in the cargo-run terminal.
 gui_subsystem = []
+# Optimizer measurement harness (bench/ corpus, static metric gate,
+# opt-bench tool).  Pulls in a pure-Rust x86 decoder + hasher used ONLY
+# to measure compiled-word codegen — kept out of the shipping binaries.
+# Enable with `cargo test --features opt-metrics` / `cargo run --bin
+# opt-bench --features opt-metrics`.
+opt-metrics = ["dep:iced-x86", "dep:blake3", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 # Path dep on JASM while both projects co-evolve. Flip to a git or
@@ -21,6 +27,15 @@ newgc-core = { path = "../NewGC/crates/newgc-core" }
 anyhow = "1"
 # libloading — runtime DLL loading for factor.dll (NewFactor IDE).
 libloading = "0.8"
+# Optimizer measurement harness deps (feature = "opt-metrics" only).
+# iced-x86: pure-Rust x86-64 decoder — classifies CALL/JMP/instructions in
+# a compiled word body deterministically (never a raw 0xE8/0xE9 byte scan).
+# blake3: body_hash / kernel_fingerprint / corpus_file_hash.
+# serde(_json): the checked-in golden baseline files.
+iced-x86   = { version = "1", optional = true, default-features = false, features = ["std", "decoder", "instr_info"] }
+blake3     = { version = "1", optional = true }
+serde      = { version = "1", optional = true, features = ["derive"] }
+serde_json = { version = "1", optional = true }
 
 [build-dependencies]
 # Embeds the Win32 application manifest (DPI awareness, common
@@ -85,6 +100,13 @@ path = "src/bin/wf64_ui.rs"
 [[bin]]
 name = "port-wf32"
 path = "src/bin/port_wf32.rs"
+
+# Optimizer before/after measurement + bless tool. Feature-gated so the
+# decoder/hasher deps never enter the default build graph.
+[[bin]]
+name = "opt-bench"
+path = "src/bin/opt_bench.rs"
+required-features = ["opt-metrics"]
 
 [[bin]]
 name = "newfactor-ui"

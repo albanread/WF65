@@ -1,0 +1,20 @@
+{
+  "_comment": "Hot-word benchmark map for the advisory dynamic layer (rdtsc/utime). The static gate does not use this file; it is consumed by the (future) opt-bench dynamic driver and documents which words are timed and how. 'arg' is the Forth literal(s) pushed before each timed call; 'iterations' is the inner-loop invocation count M; 'verdict' marks words used to render a transform verdict (vs sanity-only stressors).",
+  "words": {
+    "fold-mix":    { "file": "arith-fold.f",        "transform": 1, "arg": "10",          "iterations": 200000, "verdict": true },
+    "addk":        { "file": "arith-fold.f",        "transform": 1, "arg": "10",          "iterations": 200000, "verdict": true },
+    "bare-chain":  { "file": "bareop-inline.f",     "transform": 2, "arg": "10 20 30 40", "iterations": 200000, "verdict": true },
+    "bare-mem":    { "file": "bareop-inline.f",     "transform": 2, "arg": "64",          "iterations": 200000, "verdict": true },
+    "long-arith":  { "file": "stack-shuffle.f",     "transform": 3, "arg": "7",           "iterations": 200000, "verdict": true },
+    "shuffle-a":   { "file": "stack-shuffle.f",     "transform": 3, "arg": "10 20 30",    "iterations": 200000, "verdict": true },
+    "relay":       { "file": "tco-tail.f",          "transform": 4, "arg": "5",           "iterations": 200000, "verdict": true },
+    "countdown":   { "file": "tco-tail.f",          "transform": 4, "arg": "50",          "iterations": 100000, "verdict": true },
+    "mix-stackops":{ "file": "stackop-inline.f",    "transform": 5, "arg": "10 20",       "iterations": 200000, "verdict": true },
+    "swaps":       { "file": "stackop-inline.f",    "transform": 5, "arg": "10 20",       "iterations": 200000, "verdict": true },
+    "fib-iter":    { "file": "real-fib.f",          "transform": 6, "arg": "30",          "iterations": 100000, "verdict": true },
+    "fact":        { "file": "real-mixed.f",        "transform": 6, "arg": "12",          "iterations": 100000, "verdict": true },
+    "dot-prod":    { "file": "real-mixed.f",        "transform": 6, "arg": "",            "iterations": 50000,  "verdict": true },
+    "str-hash":    { "file": "real-mixed.f",        "transform": 6, "arg": "",            "iterations": 100000, "verdict": true },
+    "mandel-iter": { "file": "real-mandel-iter.f",  "transform": 6, "arg": "-64 0 255",  "iterations": 50000,  "verdict": true }
+  }
+}

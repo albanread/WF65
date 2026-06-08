@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "75f39ff9edbeed1ccd250289bec8a089c9377d04ba0cbec8b50f2d6da3caaee6",
+  "corpus_file_hash": "2169886a65646a6ca66ebbbf2238f1b525078ae6440d0502893248ac1ab95b76",
+  "words": {
+    "dot-prod": {
+      "byte_length": 174,
+      "call_count_E8": 13,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 2,
+      "body_hash": "63e7fa1d49c2ee2b3687377eb687c6170736c834a45a2c6e39fe7955925aca3c",
+      "instruction_count": 37,
+      "rbp_adjust_count": 3
+    },
+    "dp-setup": {
+      "byte_length": 199,
+      "call_count_E8": 12,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 1,
+      "body_hash": "b4c61c556cbd91dfafede1fd8192e0e7fed270cd1ae9392bb673280cbf404e86",
+      "instruction_count": 45,
+      "rbp_adjust_count": 5
+    },
+    "fact": {
+      "byte_length": 62,
+      "call_count_E8": 2,
+      "jmp_count_E9": 1,
+      "tail_is_jmp": true,
+      "do_lit_count": 0,
+      "body_hash": "703e937bd27d452de9c13f6083b1c402fbf4f6a99a37470e536d096d48543079",
+      "instruction_count": 16,
+      "rbp_adjust_count": 3
+    },
+    "sh-fill": {
+      "byte_length": 126,
+      "call_count_E8": 5,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 1,
+      "body_hash": "b0b48ce7a570506d4b93b9b80ee085110bb89cf25874115752263d8ace92c196",
+      "instruction_count": 29,
+      "rbp_adjust_count": 3
+    },
+    "str-hash": {
+      "byte_length": 131,
+      "call_count_E8": 7,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 2,
+      "body_hash": "30bb7cff36c16d63a6ad571b955d1c0030c4fcb5187ad88dcf3ede50aa059294",
+      "instruction_count": 28,
+      "rbp_adjust_count": 2
+    }
+  },
+  "file_totals": {
+    "bytes": 692,
+    "instr": 155,
+    "calls": 39,
+    "jmps": 1,
+    "do_lit": 6
+  }
+}

@@ -39,6 +39,13 @@ use wfasm::{Assembler, Jit};
 pub mod let_lang;
 pub mod gc;
 
+// Optimizer measurement harness (feature = "opt-metrics"). Static, byte-exact
+// codegen metrics over compiled word bodies via the existing debug_words()
+// ranges + an x86 decoder. Drives the bench/ corpus gate and the opt-bench
+// before/after tool. Excluded from the default build graph.
+#[cfg(feature = "opt-metrics")]
+pub mod opt_metrics;
+
 // iGui — Windows MDI front-end, ported from NewCormanLisp.
 // Lives behind cfg(windows); the module file applies its own
 // cfg(windows) gates on the renderer/window code.
@@ -1850,6 +1857,20 @@ impl Wf64Session {
         self.runtime_words
             .iter()
             .map(|word| (word.name.clone(), word.start, word.end))
+            .collect()
+    }
+
+    /// Like [`Self::debug_words`] but also returns each word's `dh_tfa` type-flag
+    /// byte: `0x82` = colon definition (real code the optimizer transforms),
+    /// `0x91` = CREATE-flavoured (constant/variable/buffer — whose "body" is
+    /// data, not code). Lets the optimizer measurement harness skip data words.
+    pub fn debug_words_typed(&self) -> Vec<(String, u64, u64, u8)> {
+        self.runtime_words
+            .iter()
+            .map(|word| {
+                let tfa = unsafe { ((word.header + DH_TFA) as *const u8).read() };
+                (word.name.clone(), word.start, word.end, tfa)
+            })
             .collect()
     }
 

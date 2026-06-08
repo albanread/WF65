@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kernel_fingerprint": "75f39ff9edbeed1ccd250289bec8a089c9377d04ba0cbec8b50f2d6da3caaee6",
+  "corpus_file_hash": "1ce52fb9257bb88f7fd203906470c36c1baf2cc5d1457d9a0536aa458420f31d",
+  "words": {
+    "fib-iter": {
+      "byte_length": 139,
+      "call_count_E8": 5,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 3,
+      "body_hash": "99140e4ab64072002f1b807982d4e12a243bf3258a08b4db1a847e178cd07821",
+      "instruction_count": 29,
+      "rbp_adjust_count": 3
+    }
+  },
+  "file_totals": {
+    "bytes": 139,
+    "instr": 29,
+    "calls": 5,
+    "jmps": 0,
+    "do_lit": 3
+  }
+}
