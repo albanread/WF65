@@ -636,6 +636,7 @@ pub const KERNEL_HELPERS: &[&str] = &[
     "inline_drop_comp",
     "inline_swap_comp",
     "inline_over_comp",
+    "inline_leaf_comp",
     "inline_fetch_comp",
     "inline_store_comp",
     "inline_c_fetch_comp",
@@ -1610,6 +1611,9 @@ impl Wf64Session {
             "neg_rot" => Some("inline_neg_rot_comp"),
             "nip_" => Some("inline_nip_comp"),
             "tuck_" => Some("inline_tuck_comp"),
+            // Unary zero-compares: copy the (leaf) primitive body inline.
+            "zero_equal" => Some("inline_leaf_comp"),
+            "zero_less" => Some("inline_leaf_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),

@@ -381,7 +381,7 @@ proc(fold_and_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; fold-or,  ( xt -- )     OR  rax, imm
@@ -409,7 +409,7 @@ proc(fold_or_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; fold-xor,  ( xt -- )    XOR rax, imm
@@ -437,7 +437,7 @@ proc(fold_xor_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: shifts ──────────────────────────────────────
@@ -467,7 +467,7 @@ proc(fold_lshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_rshift_comp)
@@ -487,7 +487,7 @@ proc(fold_rshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_arshift_comp)
@@ -507,7 +507,7 @@ proc(fold_arshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: equality ────────────────────────────────────
@@ -556,7 +556,7 @@ proc(fold_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_not_equal_comp)
@@ -599,7 +599,7 @@ proc(fold_not_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: unsigned-less (cheap cmp+sbb form) ──────────
@@ -635,7 +635,7 @@ proc(fold_u_less_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: general comparisons (cmp + setCC + movzx + neg) ─
@@ -701,7 +701,7 @@ proc(fold_less_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_greater_comp)
@@ -715,7 +715,7 @@ proc(fold_greater_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_less_equal_comp)
@@ -729,7 +729,7 @@ proc(fold_less_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_greater_equal_comp)
@@ -743,7 +743,7 @@ proc(fold_greater_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_greater_comp)
@@ -757,7 +757,7 @@ proc(fold_u_greater_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_less_equal_comp)
@@ -771,7 +771,7 @@ proc(fold_u_less_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_greater_equal_comp)
@@ -785,7 +785,7 @@ proc(fold_u_greater_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; (inline,)  ( xt -- )
@@ -961,6 +961,31 @@ proc(inline_store_comp)
     mov     byte ptr [r8 + 13], 0xC5
     mov     byte ptr [r8 + 14], 0x10
     add     r8, 15
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-leaf,  ( xt -- )
+;     Generic bare-op inliner used by the no-fold path of the logic / comparison
+;     / shift fold helpers.  Copies the leaf primitive body at xt — straight-line
+;     ALU/compare code, position-independent, no internal branch — up to but not
+;     including its terminating ret (0xC3), directly into the definition.  Every
+;     redirected primitive is short and contains no 0xC3 byte before its ret.
+proc(inline_leaf_comp)
+    mov     r8, [UP + user_HERE]             ; dest = HERE
+    mov     r9, rax                          ; src  = xt (primitive body start)
+.copy:
+    movzx   rcx, byte ptr [r9]
+    cmp     cl, 0xC3                         ; ret? stop (do not copy it)
+    je      .done
+    mov     [r8], cl
+    inc     r9
+    inc     r8
+    jmp     .copy
+.done:
     mov     [UP + user_HERE], r8
     mov     qword ptr [UP + user_TAIL_CALL], 0
     mov     TOS, [DSP]

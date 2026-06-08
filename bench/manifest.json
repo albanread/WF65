@@ -15,6 +15,10 @@
     "fact":        { "file": "real-mixed.f",        "transform": 6, "arg": "12",          "iterations": 100000, "verdict": true },
     "dot-prod":    { "file": "real-mixed.f",        "transform": 6, "arg": "",            "iterations": 50000,  "verdict": true },
     "str-hash":    { "file": "real-mixed.f",        "transform": 6, "arg": "",            "iterations": 100000, "verdict": true },
-    "mandel-iter": { "file": "real-mandel-iter.f",  "transform": 6, "arg": "-64 0 255",  "iterations": 50000,  "verdict": true }
+    "mandel-iter": { "file": "real-mandel-iter.f",  "transform": 6, "arg": "-64 0 255",  "iterations": 50000,  "verdict": true },
+    "cmp-chain":   { "file": "bareop-compare.f",    "transform": 2, "arg": "3 5",        "iterations": 200000, "verdict": true },
+    "logic-chain": { "file": "bareop-compare.f",    "transform": 2, "arg": "12 10",      "iterations": 200000, "verdict": true },
+    "shift-chain": { "file": "bareop-compare.f",    "transform": 2, "arg": "255 3",      "iterations": 200000, "verdict": true },
+    "zero-chain":  { "file": "bareop-compare.f",    "transform": 2, "arg": "-7",         "iterations": 200000, "verdict": true }
   }
 }
