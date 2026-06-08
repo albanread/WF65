@@ -916,6 +916,148 @@ proc(inline_store_comp)
     next()
 endp()
 
+; inline-rot,  ( xt -- )   rot ( n1 n2 n3 -- n2 n3 n1 ), mirrors proc(rot_).
+proc(inline_rot_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov rdx, [rbp+8]
+    mov     byte ptr [r8 + 5], 0x8B
+    mov     byte ptr [r8 + 6], 0x55
+    mov     byte ptr [r8 + 7], 0x08
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp], rax
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x45
+    mov     byte ptr [r8 + 11], 0x00
+    mov     byte ptr [r8 + 12], 0x48         ; mov [rbp+8], rcx
+    mov     byte ptr [r8 + 13], 0x89
+    mov     byte ptr [r8 + 14], 0x4D
+    mov     byte ptr [r8 + 15], 0x08
+    mov     byte ptr [r8 + 16], 0x48         ; mov rax, rdx
+    mov     byte ptr [r8 + 17], 0x89
+    mov     byte ptr [r8 + 18], 0xD0
+    add     r8, 19
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline--rot,  ( xt -- )   -rot ( n1 n2 n3 -- n3 n1 n2 ), mirrors proc(neg_rot).
+proc(inline_neg_rot_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp+8]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x08
+    mov     byte ptr [r8 + 4], 0x48          ; mov rdx, [rbp]
+    mov     byte ptr [r8 + 5], 0x8B
+    mov     byte ptr [r8 + 6], 0x55
+    mov     byte ptr [r8 + 7], 0x00
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp+8], rax
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x45
+    mov     byte ptr [r8 + 11], 0x08
+    mov     byte ptr [r8 + 12], 0x48         ; mov [rbp], rcx
+    mov     byte ptr [r8 + 13], 0x89
+    mov     byte ptr [r8 + 14], 0x4D
+    mov     byte ptr [r8 + 15], 0x00
+    mov     byte ptr [r8 + 16], 0x48         ; mov rax, rdx
+    mov     byte ptr [r8 + 17], 0x89
+    mov     byte ptr [r8 + 18], 0xD0
+    add     r8, 19
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-nip,  ( xt -- )    nip ( a b -- b ) = drop NOS = `add rbp, 8`.
+proc(inline_nip_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; add rbp, 8
+    mov     byte ptr [r8 + 1], 0x83
+    mov     byte ptr [r8 + 2], 0xC5
+    mov     byte ptr [r8 + 3], 0x08
+    add     r8, 4
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-tuck,  ( xt -- )   tuck ( n1 n2 -- n2 n1 n2 ), mirrors proc(tuck_).
+proc(inline_tuck_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov [rbp], rax
+    mov     byte ptr [r8 + 5], 0x89
+    mov     byte ptr [r8 + 6], 0x45
+    mov     byte ptr [r8 + 7], 0x00
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp-8], rcx
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x4D
+    mov     byte ptr [r8 + 11], 0xF8
+    mov     byte ptr [r8 + 12], 0x48         ; sub rbp, 8
+    mov     byte ptr [r8 + 13], 0x83
+    mov     byte ptr [r8 + 14], 0xED
+    mov     byte ptr [r8 + 15], 0x08
+    add     r8, 16
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-c@,  ( xt -- )     c@ ( addr -- byte ) = `movzx rax, byte ptr [rax]`.
+proc(inline_c_fetch_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; movzx rax, byte ptr [rax]
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xB6
+    mov     byte ptr [r8 + 3], 0x00
+    add     r8, 4
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-c!,  ( xt -- )     c! ( byte addr -- ), mirrors proc(c_store).
+proc(inline_c_store_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x88          ; mov [rax], cl
+    mov     byte ptr [r8 + 5], 0x08
+    mov     byte ptr [r8 + 6], 0x48          ; mov rax, [rbp+8]
+    mov     byte ptr [r8 + 7], 0x8B
+    mov     byte ptr [r8 + 8], 0x45
+    mov     byte ptr [r8 + 9], 0x08
+    mov     byte ptr [r8 + 10], 0x48         ; add rbp, 16
+    mov     byte ptr [r8 + 11], 0x83
+    mov     byte ptr [r8 + 12], 0xC5
+    mov     byte ptr [r8 + 13], 0x10
+    add     r8, 14
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
 ; inline->r,  ( xt -- )
 ;     Emit >R directly into the current definition, matching WF32's
 ;     inline body with no callable-proc return-address juggling.

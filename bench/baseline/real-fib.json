@@ -1,23 +1,23 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
+  "kernel_fingerprint": "99c776c48f24c4cf55cd6b6047c0eea6644de6580c026acb65ffe96c9dc99b8a",
   "corpus_file_hash": "1ce52fb9257bb88f7fd203906470c36c1baf2cc5d1457d9a0536aa458420f31d",
   "words": {
     "fib-iter": {
-      "byte_length": 142,
-      "call_count_E8": 4,
+      "byte_length": 156,
+      "call_count_E8": 3,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 3,
-      "body_hash": "03a83c2805d141a10cdc93bbd7e70e654742658377e61c11aa8517b40ee150b9",
-      "instruction_count": 30,
+      "body_hash": "5788279bd3cb458d6b452fd2e6c255d0b655a9baec035e87f549f0e41b2468eb",
+      "instruction_count": 34,
       "rbp_adjust_count": 4
     }
   },
   "file_totals": {
-    "bytes": 142,
-    "instr": 30,
-    "calls": 4,
+    "bytes": 156,
+    "instr": 34,
+    "calls": 3,
     "jmps": 0,
     "do_lit": 3
   }

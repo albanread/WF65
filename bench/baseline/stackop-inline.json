@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
+  "kernel_fingerprint": "99c776c48f24c4cf55cd6b6047c0eea6644de6580c026acb65ffe96c9dc99b8a",
   "corpus_file_hash": "40ef4264acd6e4b9bc9cd4f8e4ec507102e73dd6d9faf4daa3cfb59a0d3c1ab2",
   "words": {
     "clamp": {
@@ -44,14 +44,14 @@
       "rbp_adjust_count": 4
     },
     "mix-stackops": {
-      "byte_length": 95,
+      "byte_length": 94,
       "call_count_E8": 3,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 2,
-      "body_hash": "496690ee38b91f9817ec9c53797b1f37cbb8a2ac6971aee5fe9bd64cb2116b4e",
+      "body_hash": "192a5dfe6c0c8e5d9027cf4551df43d24c53648c94d2ded786fd17d5584ee844",
       "instruction_count": 20,
-      "rbp_adjust_count": 1
+      "rbp_adjust_count": 2
     },
     "swap-step": {
       "byte_length": 70,
@@ -75,10 +75,10 @@
     }
   },
   "file_totals": {
-    "bytes": 488,
+    "bytes": 487,
     "instr": 115,
     "calls": 12,
-    "jmps": 1,
+    "jmps": 0,
     "do_lit": 6
   }
 }

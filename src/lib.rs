@@ -638,6 +638,12 @@ pub const KERNEL_HELPERS: &[&str] = &[
     "inline_over_comp",
     "inline_fetch_comp",
     "inline_store_comp",
+    "inline_c_fetch_comp",
+    "inline_c_store_comp",
+    "inline_rot_comp",
+    "inline_neg_rot_comp",
+    "inline_nip_comp",
+    "inline_tuck_comp",
     "inline_to_r_comp",
     "inline_r_from_comp",
     "inline_r_fetch_comp",
@@ -1596,6 +1602,14 @@ impl Wf64Session {
             // @ / ! has no foldable literal operand, so inlining is the only win.
             "fetch" => Some("inline_fetch_comp"),
             "store" => Some("inline_store_comp"),
+            "c_fetch" => Some("inline_c_fetch_comp"),
+            "c_store" => Some("inline_c_store_comp"),
+            // Remaining stack shuffles (rot/-rot/nip/tuck) — inline register
+            // moves instead of a CALL.
+            "rot_" => Some("inline_rot_comp"),
+            "neg_rot" => Some("inline_neg_rot_comp"),
+            "nip_" => Some("inline_nip_comp"),
+            "tuck_" => Some("inline_tuck_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),

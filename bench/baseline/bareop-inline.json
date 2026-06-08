@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
+  "kernel_fingerprint": "99c776c48f24c4cf55cd6b6047c0eea6644de6580c026acb65ffe96c9dc99b8a",
   "corpus_file_hash": "8be231d9459e5231c3cc33a65eb7ae1230c387e163e8a87459c2b5649b79990f",
   "words": {
     "bare-add": {
@@ -14,13 +14,13 @@
       "rbp_adjust_count": 1
     },
     "bare-chain": {
-      "byte_length": 50,
-      "call_count_E8": 1,
+      "byte_length": 64,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "f48b2933e9a2db0687b365f43d3220fccba19a74b073d4d0980dd7e17b4d5e15",
-      "instruction_count": 13,
+      "body_hash": "01e03d1912ae074ec0a7b69666535a94ac04fd9692a44ce89ea95aab5eae102f",
+      "instruction_count": 17,
       "rbp_adjust_count": 5
     },
     "bare-mem": {
@@ -35,9 +35,9 @@
     }
   },
   "file_totals": {
-    "bytes": 301,
-    "instr": 71,
-    "calls": 14,
+    "bytes": 315,
+    "instr": 75,
+    "calls": 13,
     "jmps": 0,
     "do_lit": 3
   }
