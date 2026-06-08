@@ -206,8 +206,34 @@ proc(fold_plus_comp)
     stk(1, 0)
     next()
 .no_fold:
-    ; bare + (no foldable literal): inline `add rax,[rbp] ; add rbp,8`
     mov     r8, [UP + user_HERE]
+    ; T3 peephole: an inline `dup` (48 89 45 F8 48 83 ED 08) immediately before
+    ; a bare + is `dup +` == 2*TOS.  Fuse to `add rax,rax`, eliminating the
+    ; spill/reload and the paired rbp adjusts (rbp-materialization elimination).
+    cmp     byte ptr [r8 - 8], 0x48
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 7], 0x89
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 6], 0x45
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 5], 0xF8
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 4], 0x48
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 3], 0x83
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 2], 0xED
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 1], 0x08
+    jne     .plus_plain
+    sub     r8, 8                            ; rewind over the inline dup
+    mov     byte ptr [r8 + 0], 0x48          ; add rax, rax
+    mov     byte ptr [r8 + 1], 0x01
+    mov     byte ptr [r8 + 2], 0xC0
+    add     r8, 3
+    jmp     .commit
+.plus_plain:
+    ; bare + (no foldable literal): inline `add rax,[rbp] ; add rbp,8`
     mov     byte ptr [r8 + 0], 0x48          ; add rax, [rbp]
     mov     byte ptr [r8 + 1], 0x03
     mov     byte ptr [r8 + 2], 0x45
@@ -289,8 +315,34 @@ proc(fold_times_comp)
     stk(1, 0)
     next()
 .no_fold:
-    ; bare * (no foldable literal): inline `imul rax,[rbp] ; add rbp,8`
     mov     r8, [UP + user_HERE]
+    ; T3 peephole: inline `dup` immediately before a bare * is `dup *` ==
+    ; TOS*TOS.  Fuse to `imul rax,rax`.
+    cmp     byte ptr [r8 - 8], 0x48
+    jne     .times_plain
+    cmp     byte ptr [r8 - 7], 0x89
+    jne     .times_plain
+    cmp     byte ptr [r8 - 6], 0x45
+    jne     .times_plain
+    cmp     byte ptr [r8 - 5], 0xF8
+    jne     .times_plain
+    cmp     byte ptr [r8 - 4], 0x48
+    jne     .times_plain
+    cmp     byte ptr [r8 - 3], 0x83
+    jne     .times_plain
+    cmp     byte ptr [r8 - 2], 0xED
+    jne     .times_plain
+    cmp     byte ptr [r8 - 1], 0x08
+    jne     .times_plain
+    sub     r8, 8                            ; rewind over the inline dup
+    mov     byte ptr [r8 + 0], 0x48          ; imul rax, rax
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xAF
+    mov     byte ptr [r8 + 3], 0xC0
+    add     r8, 4
+    jmp     .commit
+.times_plain:
+    ; bare * (no foldable literal): inline `imul rax,[rbp] ; add rbp,8`
     mov     byte ptr [r8 + 0], 0x48          ; imul rax, [rbp]
     mov     byte ptr [r8 + 1], 0x0F
     mov     byte ptr [r8 + 2], 0xAF

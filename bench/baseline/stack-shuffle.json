@@ -1,17 +1,17 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "99c776c48f24c4cf55cd6b6047c0eea6644de6580c026acb65ffe96c9dc99b8a",
+  "kernel_fingerprint": "9f559c0856cf517fc3df428bda70ea4c6aff5b45c11b1d13ca6df635b55a8072",
   "corpus_file_hash": "12347e8c2918d4109d18b7a6dc1302e75dfb01ca59b17a3f15a15a7836f4c332",
   "words": {
     "long-arith": {
-      "byte_length": 161,
+      "byte_length": 31,
       "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "53b914b06df52a07c374c08df6299e54ce694d56383443d25e64b577a7471f65",
-      "instruction_count": 41,
-      "rbp_adjust_count": 20
+      "body_hash": "ef1177be0220363148b4a95c19b50968bc1ed16513d801e73f17c81357916080",
+      "instruction_count": 11,
+      "rbp_adjust_count": 0
     },
     "shuffle-a": {
       "byte_length": 102,
@@ -25,8 +25,8 @@
     }
   },
   "file_totals": {
-    "bytes": 263,
-    "instr": 68,
+    "bytes": 133,
+    "instr": 38,
     "calls": 0,
     "jmps": 0,
     "do_lit": 0
