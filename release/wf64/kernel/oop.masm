@@ -1,0 +1,74 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — object-system dispatch primitives (Phase 0).
+;
+; The class/object DSL itself (class, subclass, ivar:, :m, ;m, new, ->,
+; super) lives in lib/oop.f and is pure Forth.  Only the message-send
+; hot path is here: a late-bound (send), an early-bound (send-xt), and
+; the `self` accessor.  See docs/oop_design.md.
+;
+;   Class struct:   [ class_super | class_isize | class_vt[CAP] ]
+;   Object layout:  [ class-ptr | ivar0 | ivar1 | ... ]
+;
+; `self` (the current receiver) lives in user_SELF.  Each send saves the
+; previous self on the return stack and restores it after the method
+; returns, so nested sends, recursion, and EXIT-in-method are all safe:
+; the save/restore bracket lives in the SEND frame, not the method.
+; ─────────────────────────────────────────────────────────────────────
+
+; self  ( -- obj )
+;     Push the current receiver (0 when not inside a method).
+proc(self_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_SELF]
+    stk(0, 1)
+    next()
+endp()
+
+; (send)  ( i*x obj sel -- j*x )
+;     Late-bound message send.  obj = receiver (NOS), sel = selector id
+;     (TOS).  Look the method xt up in obj's class vtable, then dispatch.
+proc(send_word)
+    mov     rcx, [DSP]                  ; rcx = obj (receiver)
+    mov     rdx, [rcx]                  ; rdx = class struct (obj+0)
+    shl     rax, 3                      ; rax = sel * cell   (TOS consumed)
+    add     rax, rdx
+    mov     r8, [rax + class_vt]        ; r8 = vtable[sel] = method xt
+    mov     TOS, [DSP + cell]           ; drop obj+sel, expose first real arg
+    add     DSP, 2*cell
+    jmp     send_enter                  ; r8 = xt, rcx = obj
+endp()
+
+; (send-xt)  ( i*x obj xt -- j*x )
+;     Early-bound message send: the method xt is already resolved, so no
+;     vtable lookup.  Used by the compiler's early-binding path.
+proc(send_xt_word)
+    mov     r8, rax                     ; r8 = xt (TOS)
+    mov     rcx, [DSP]                  ; rcx = obj (receiver)
+    mov     TOS, [DSP + cell]           ; drop obj+xt, expose first real arg
+    add     DSP, 2*cell
+    jmp     send_enter                  ; r8 = xt, rcx = obj
+endp()
+
+; send_enter  ( internal )   r8 = method xt, rcx = receiver
+;     Bracket self around a tail-jump into the method.  The method's RET
+;     lands in send_restore, which pops the saved self and returns to the
+;     send's own caller.  No caller-saved register is held across the
+;     method call, so the method may freely clobber scratch / use the
+;     return stack / EXIT early.
+proc(send_enter)
+    mov     r9, [UP + user_SELF]        ; old self
+    mov     [UP + user_SELF], rcx       ; self := receiver
+    push    r9                          ; [ old_self | caller_ret ]
+    lea     r10, [rip + send_restore]
+    push    r10                         ; [ send_restore | old_self | caller_ret ]
+    jmp     r8                          ; tail into the method body
+endp()
+
+; send_restore  ( internal )
+;     Method returned here; restore the previous self and return to the
+;     send's caller.
+proc(send_restore)
+    pop     r9                          ; old self  ( caller_ret remains )
+    mov     [UP + user_SELF], r9
+    next()                              ; ret -> send's caller
+endp()

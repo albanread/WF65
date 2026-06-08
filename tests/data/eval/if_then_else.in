@@ -1,0 +1,6 @@
+# requires: if then else
+: nonzero?  IF 1 ELSE 0 THEN ;
+1 nonzero? .
+0 nonzero? .
+-1 nonzero? .
+bye

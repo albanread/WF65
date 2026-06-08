@@ -1,0 +1,492 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — GC primitives (V1b).
+;
+; Surface: HEAPPTR defining word, (gc) / gc-minor explicit collections,
+; vec-alloc-floats! allocator, vec-f@ / vec-f! accessors, vec-len.
+;
+; All the heavy lifting is in Rust runtime functions (rt_vec_alloc_*,
+; rt_gc_collect*).  These primitives are thin Forth-shaped wrappers
+; that marshal stack arguments into Win64 calling convention, throw
+; on failure, and clean up the stack appropriately.
+;
+; Tag conventions (see src/gc/layout.rs):
+;   FloatVec pointers have low 3 bits = 010 (= 2)
+;   RefVec   pointers have low 3 bits = 011 (= 3)
+;   String   pointers have low 3 bits = 100 (= 4)
+; HEAPPTR slots hold tagged pointers; raw addresses live transiently
+; inside these primitives only.
+;
+; Throw codes:
+;   -2058  generic GC error (HEAPPTR region overflow, etc.)
+;   -2059  GC out of memory (allocation failed)
+;   -2060  type mismatch  (vec-f@ on a non-FloatVec, etc.)
+;   -2061  nil dereference (vec-f@/vec-f!/vec-len on a HEAPPTR slot
+;          that still holds nil — never bound to a heap object)
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; HEAPPTR  ( "name" -- )
+;     Defining word.  Allocates the next slot in user_HEAPPTR_REGION
+;     and creates a Forth word that, when invoked, pushes the slot's
+;     absolute address (the "handle" — stable for the program's life).
+;
+;     The slot is zero-initialised (nil).  Use vec-alloc-*! or
+;     !heapptr to bind it to an actual heap object.
+proc(heapptr_word)
+    call    parse_name                              ; ( -- c-addr u )
+    test    TOS, TOS
+    jnz     .got_name
+    ; No name on the line — drop (c-addr 0) and throw -16.
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    call    throw_namereqd_const
+    call    throw_word
+    next()
+
+.got_name:
+    ; Region full?  Bump pointer at user_HEAPPTR_NEXT vs. base+size.
+    mov     r10, [UP + user_HEAPPTR_NEXT]
+    lea     r11, [UP + user_HEAPPTR_BASE]
+    add     r11, heapptr_region_size
+    cmp     r10, r11
+    jb      .has_room
+    ; Full.  Drop (c-addr u), throw -2058.
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.has_room:
+    ; Build the dict header.  `create` (the primitive) builds the
+    ; header but does NOT emit a body stub — that's the caller's job.
+    ; (`create_word`, the Forth-level CREATE, emits the standard
+    ; "push body addr" stub; we emit a near-identical stub but with
+    ; the imm64 holding our SLOT address rather than a body address.)
+    call    create
+    mov     r8, [UP + user_LATEST]
+    mov     byte ptr [r8 + dh_tfa], tfa_tcre        ; CREATE-flavoured
+
+    mov     r9,  [UP + user_HERE]                   ; body start = where to emit stub
+    mov     r10, [UP + user_HEAPPTR_NEXT]           ; slot address (abs)
+
+    ; Emit the 19-byte stub at xt, padded to create_stub_size (= 24).
+    ; mov [rbp-8], rax        (4)
+    mov     byte ptr [r9 + 0],  0x48
+    mov     byte ptr [r9 + 1],  0x89
+    mov     byte ptr [r9 + 2],  0x45
+    mov     byte ptr [r9 + 3],  0xF8
+    ; mov rax, imm64          (10) — imm64 = r10 (slot address)
+    mov     byte ptr [r9 + 4],  0x48
+    mov     byte ptr [r9 + 5],  0xB8
+    mov     qword ptr [r9 + 6], r10
+    ; sub rbp, 8              (4)
+    mov     byte ptr [r9 + 14], 0x48
+    mov     byte ptr [r9 + 15], 0x83
+    mov     byte ptr [r9 + 16], 0xED
+    mov     byte ptr [r9 + 17], 0x08
+    ; ret                     (1)
+    mov     byte ptr [r9 + 18], 0xC3
+    ; Clear padding bytes 19..23 for predictable contents.
+    mov     dword ptr [r9 + 19], 0
+    mov     byte ptr [r9 + 23], 0
+
+    ; Advance HERE past the stub.
+    add     r9, create_stub_size
+    mov     [UP + user_HERE], r9
+
+    ; Zero the slot and bump HEAPPTR_NEXT past it.
+    mov     qword ptr [r10], 0
+    add     qword ptr [UP + user_HEAPPTR_NEXT], cell
+    next()
+endp()
+
+
+; (gc)  ( -- )
+;     Run a major garbage collection.  Data stack must be clean of
+;     raw GC pointers (in practice this means: don't call this while
+;     holding a result from @heapptr that you haven't stored back).
+proc(gc_collect_word)
+    mov     rcx, UP
+    win64_call(rt_gc_collect)
+    test    rax, rax
+    jz      .ok
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.ok:
+    next()
+endp()
+
+
+; gc-minor  ( -- )
+;     Run a minor (young-generation only) collection.
+proc(gc_collect_minor_word)
+    mov     rcx, UP
+    win64_call(rt_gc_collect_minor)
+    test    rax, rax
+    jz      .ok
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.ok:
+    next()
+endp()
+
+
+; vec-alloc-floats!  ( n handle -- )
+;     Allocate an n-cell FloatVec and store the tagged pointer in the
+;     HEAPPTR slot at [handle].  Atomic: the raw GC pointer never
+;     appears on the data stack.
+;
+;     V2: before allocating, ask paged_gc whether its allocation
+;     budget has been exhausted (`rt_gc_should_collect`).  If so,
+;     run a minor GC first.  This is the "auto-GC" promise from
+;     docs/gc_design.md V2: callers no longer have to remember to
+;     call `(gc)` periodically; the cost shows up in `gc-cycle`
+;     instead.
+proc(vec_alloc_floats_store)
+    ; Stack: handle in TOS, n at [DSP].
+    ; Stash handle in r14 (callee-saved across Win64 callouts) so it
+    ; survives across rt_gc_auto_step.  n stays in memory at [DSP].
+    ;
+    ; Auto-GC: rt_gc_auto_step gates on should_collect() internally
+    ; and runs collect_auto when needed (minor unless tenure
+    ; pressure crosses the threshold, in which case major).
+    ; Per docs/forth_gc_needs.md item #7.
+    mov     r14, TOS
+    mov     rcx, UP
+    win64_call(rt_gc_auto_step)
+    ; Allocator now takes UP for the fragmentation-retry path.
+    mov     rcx, UP                                 ; arg1: up
+    mov     rdx, [DSP]                              ; arg2: n
+    mov     r8,  r14                                ; arg3: handle (slot addr)
+    win64_call(rt_vec_alloc_floats)
+    test    rax, rax
+    jnz     .err
+    ; Success: drop both args.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.err:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2059
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; vec-alloc-refs!  ( n handle -- )
+;     Allocate an n-cell RefVec (all slots initialised to nil) and
+;     store the tagged pointer in the HEAPPTR slot at [handle].
+;     Same auto-step + fragmentation-retry pattern as
+;     vec-alloc-floats!.
+proc(vec_alloc_refs_store)
+    mov     r14, TOS
+    mov     rcx, UP
+    win64_call(rt_gc_auto_step)
+    mov     rcx, UP
+    mov     rdx, [DSP]
+    mov     r8,  r14
+    win64_call(rt_vec_alloc_refs)
+    test    rax, rax
+    jnz     .err
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.err:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2059
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; !heapptr  ( tagged handle -- )
+;     Store `tagged` (a tagged GC pointer or nil) into the HEAPPTR
+;     slot at [handle].  Functionally equivalent to `!` today, but
+;     it's the conceptual hook for future card-marking: when V2c
+;     wires up the static-region card table (see
+;     docs/forth_gc_needs.md item #1), this is where we'll call
+;     into paged_gc to dirty the card containing [handle].
+;
+;     Right now the HEAPPTR region is fully rescanned on every
+;     minor GC, so the barrier is a no-op — but using `!heapptr`
+;     instead of raw `!` is the intent signal that lets us add the
+;     barrier later in one place without touching client code.
+proc(store_heapptr_word)
+    ; Stack: handle in TOS, tagged at [DSP].
+    mov     r9, [DSP]                               ; tagged value
+    mov     qword ptr [TOS], r9                     ; store into slot
+    ; Drop both args.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+endp()
+
+
+; gc-cycle  ( -- n )
+;     Push the current GC cycle counter (monotonic, incremented on
+;     each major or minor collection).  See V2 in docs/gc_design.md:
+;     once auto-GC is in play, any raw heap pointer a long-running
+;     word holds may silently become stale across an allocation that
+;     used to be safe pre-V2.  Snapshot this counter, compare after
+;     each allocation, refresh from @heapptr if it changed.
+proc(gc_cycle_word)
+    pushd_call(rt_gc_cycle_count)
+    next()
+endp()
+
+
+; vec-f@  ( handle index -- )  ( F: -- val )
+;     Read payload cell `index` of the FloatVec referenced by
+;     [handle] onto the FP stack.  index is 0-based; cell 0 is the
+;     first payload cell (the header is hidden).
+proc(vec_f_fetch)
+    ; TOS = index, [DSP] = handle.
+    mov     r9, [DSP]                               ; r9 = handle (slot addr)
+    mov     r9, [r9]                                ; r9 = tagged pointer
+    test    r9, r9
+    jz      .nil_deref
+    ; Check tag is FloatVec (= 2).
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 2
+    jne     .wrong_type
+    and     r9, -8                                  ; strip tag
+
+    ; Compute payload cell address: r9 + 8 (header) + index*8.
+    ; rax holds index.
+    lea     r9, [r9 + 8 + rax*8]
+
+    ; Load f64 into xmm0, push onto FP stack.
+    movsd   xmm0, qword ptr [r9]
+    mov     rcx, [UP + user_FSP]
+    sub     rcx, cell
+    mov     [UP + user_FSP], rcx
+    movsd   qword ptr [rcx], xmm0
+
+    ; Drop handle and index; raise.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; vec-f!  ( handle index -- )  ( F: val -- )
+;     Store FP TOS into payload cell `index` of the FloatVec
+;     referenced by [handle].  Consumes the FP value.
+proc(vec_f_store)
+    mov     r9, [DSP]                               ; handle
+    mov     r9, [r9]                                ; tagged pointer
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 2
+    jne     .wrong_type
+    and     r9, -8
+
+    lea     r9, [r9 + 8 + rax*8]
+
+    ; Pop FP TOS into xmm0.
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+
+    movsd   qword ptr [r9], xmm0
+
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; vec-ref@  ( handle index -- tagged )
+;     Fetch the tagged pointer at payload cell `index` of the
+;     RefVec referenced by [handle].  Index is 0-based; cell 0 is
+;     the first payload cell (the header is hidden).
+;
+;     RefVec cells hold either nil (0) or a tagged GC pointer; the
+;     GC walks them precisely.  Throws -2060 on a non-RefVec
+;     handle, -2061 on nil.  Bounds checking is deferred to V3
+;     (the demo using this stays inside its declared length).
+proc(vec_ref_fetch)
+    ; TOS = index, [DSP] = handle.
+    mov     r9, [DSP]                               ; handle
+    mov     r9, [r9]                                ; tagged pointer
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 3                                  ; TAG_REFVEC
+    jne     .wrong_type
+    and     r9, -8                                  ; strip tag → base
+
+    ; Load cell at base + 8 + index*8.  rax holds index.
+    mov     r9, [r9 + 8 + rax*8]
+
+    ; Drop handle and index from stack, push the loaded value.
+    mov     TOS, r9
+    stk(1, 0)
+    next()
+
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; vec-ref!  ( tagged handle index -- )
+;     Store `tagged` into payload cell `index` of the RefVec
+;     referenced by [handle].
+;
+;     SHARP TOOL note: V2s ships this without a card-mark write
+;     barrier.  Storing a young-generation pointer into a tenured
+;     RefVec creates an old→young edge that a future minor GC
+;     might miss.  In V2s-era programs the RefVec and its
+;     contents are usually allocated in the same burst and stay
+;     in the same generation, so this hasn't bitten yet.  The
+;     proper fix is the static-card-table integration tracked as
+;     item #1 in docs/forth_gc_needs.md.
+proc(vec_ref_store)
+    ; TOS = index, [DSP] = handle, [DSP + cell] = tagged.
+    mov     r9, [DSP]                               ; handle
+    mov     r9, [r9]                                ; tagged refvec ptr
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 3
+    jne     .wrong_type
+    and     r9, -8
+
+    ; Compute cell addr = base + 8 + index*8.
+    lea     r9, [r9 + 8 + rax*8]
+    ; Load the value-to-store.
+    mov     r10, [DSP + cell]
+    mov     [r9], r10
+
+    ; Drop 3 cells: (tagged handle index --).  We have NNOS=tagged,
+    ; NOS=handle, TOS=index.  After: TOS = whatever was below NNOS.
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    next()
+
+.wrong_type:
+    ; Drop 3, push -2060.
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; vec-len  ( handle -- n )
+;     Read the length field from the object's header.  For FloatVec
+;     and RefVec, returns payload-cell count.  For String, returns
+;     byte count.  Caller is responsible for knowing the type.
+proc(vec_len)
+    mov     r9, TOS                                 ; handle
+    mov     r9, [r9]                                ; tagged pointer
+    test    r9, r9
+    jz      .nil_deref
+    and     r9, -8                                  ; strip tag
+
+    mov     r10, [r9]                               ; header word
+    shr     r10, 5                                  ; remove 5-bit type
+    mov     r11, 0xFFFFFF
+    and     r10, r11                                ; mask 24-bit length
+
+    mov     TOS, r10
+    next()
+
+.nil_deref:
+    ; Replace TOS (handle) with throw code -2061.
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()

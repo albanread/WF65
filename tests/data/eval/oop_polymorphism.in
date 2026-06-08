@@ -1,0 +1,8 @@
+class shape cell ivar: s :m area 0 ;m :m sets s ! ;m end-class
+shape subclass sq :m area s @ s @ * ;m end-class
+shape subclass tri :m area s @ s @ * 2/ ;m end-class
+sq new q 5 q -> sets
+tri new t 6 t -> sets
+q -> area .
+t -> area .
+bye

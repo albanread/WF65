@@ -1,0 +1,438 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — arithmetic primitives.
+;
+; Each primitive matches WF32's gkernel32.fs shape. The `stk(in, out)`
+; macro emits the data-stack-pointer adjustment that WF32's `next;`
+; macro derived from `in/out` annotations.
+;
+; M2 ships only `+`. Later milestones add: `-`, `*`, `/`, `mod`,
+; `negate`, `abs`, `1+`, `1-`, `2*`, `2/`, etc.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; +  ( n1 n2 -- n3 )
+;     TOS += NOS, drop NOS.
+proc(plus)
+    add     TOS, [DSP]      ; read NOS — must happen before stk()
+    stk(2, 1)               ; drop one cell on net → add rbp, 8
+    next()
+endp()
+
+; *  ( n1 n2 -- n3 )
+;     Signed multiply. Uses imul for 64-bit single-product semantics
+;     (sufficient for cells; double-cell `um*` and `m*` come later).
+proc(times)
+    imul    TOS, [DSP]
+    stk(2, 1)
+    next()
+endp()
+
+; ─── Ported batch (via `cargo run --bin port-wf32`) ───────────────────
+; All translated from gkernel32.fs:299-471. Mechanical port —
+; register renames + memory-syntax flip + cdq→cqo + dword→qword
+; for cell-sized memory ops. Every primitive verified against the
+; WF32 source line-for-line.
+
+; -  ( n1 n2 -- n3 )
+;     Signed subtract. neg then add is the WF32 idiom — equivalent to
+;     `sub rax, [rbp]` followed by negate, but the WF32 sequence
+;     happens to avoid the 3-byte rex+mem encoding on the sub.
+proc(minus)
+    neg     rax
+    add     rax, [rbp]
+    stk(2, 1)
+    next()
+endp()
+
+; negate  ( n1 -- n2 )
+;     Two's-complement negation.
+proc(negate)
+    neg     rax
+    stk(1, 1)
+    next()
+endp()
+
+; abs  ( n -- |n| )
+;     Absolute value via `cqo`-then-xor trick. cqo sign-extends rax
+;     into rdx (all 0s if positive, all 1s if negative); xor flips
+;     bits if negative; sub adjusts off-by-one for the two's complement
+;     edge. Branch-free.
+proc(abs)
+    cqo
+    xor     rax, rdx
+    sub     rax, rdx
+    stk(1, 1)
+    next()
+endp()
+
+; 1+  ( n1 -- n2 )
+proc(one_plus)
+    add     rax, 1
+    stk(1, 1)
+    next()
+endp()
+
+; 1-  ( n1 -- n2 )
+proc(one_minus)
+    sub     rax, 1
+    stk(1, 1)
+    next()
+endp()
+
+; 2+  ( n1 -- n2 )
+proc(two_plus)
+    add     rax, 2
+    stk(1, 1)
+    next()
+endp()
+
+; 2-  ( n1 -- n2 )
+proc(two_minus)
+    sub     rax, 2
+    stk(1, 1)
+    next()
+endp()
+
+; 2*  ( n1 -- n2 )
+;     Shift left by one. `add rax, rax` is the same byte count as
+;     `shl rax, 1` but clears the carry-in dependency — WF32 idiom.
+proc(two_times)
+    add     rax, rax
+    stk(1, 1)
+    next()
+endp()
+
+; 3*  ( n1 -- n2 )
+proc(three_times)
+    lea     rax, [rax + rax*2]
+    stk(1, 1)
+    next()
+endp()
+
+; 5*  ( n1 -- n2 )
+proc(five_times)
+    lea     rax, [rax + rax*4]
+    stk(1, 1)
+    next()
+endp()
+
+; 10*  ( n1 -- n2 )
+proc(ten_times)
+    add     rax, rax
+    lea     rax, [rax + rax*4]
+    stk(1, 1)
+    next()
+endp()
+
+; 2/  ( n1 -- n2 )
+;     Signed shift right by one (arithmetic). Preserves sign.
+proc(two_slash)
+    sar     rax, 1
+    stk(1, 1)
+    next()
+endp()
+
+; u2/  ( n1 -- n2 )
+;     Unsigned shift right by one (logical). Treats input as unsigned.
+proc(u2slash)
+    shr     rax, 1
+    stk(1, 1)
+    next()
+endp()
+
+; +!  ( n1 a1 -- )
+;     Add NOS into the cell at TOS. The `add [rax], rcx` uses rcx's
+;     64-bit operand size — no `qword ptr` needed.
+proc(plus_store)
+    mov     rcx, [rbp]
+    add     [rax], rcx
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; @+!  ( n addr -- old )    fetch cell at addr, add n, return old cell.
+proc(fetch_plus_store)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    xadd    [rcx], rax
+    stk(2, 1)
+    next()
+endp()
+
+; 1+!  ( addr -- )
+;     Increment the cell at addr. `qword ptr` because the immediate
+;     `1` has no size on its own; on WF32 this was `dword` (4-byte
+;     cell), here we want the full 8.
+proc(one_plus_store)
+    add     qword ptr [rax], 1
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()
+
+; 1-!  ( addr -- )
+;     Decrement the cell at addr.
+proc(one_minus_store)
+    sub     qword ptr [rax], 1
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()
+
+; 1+c!  ( addr -- )    increment the byte at addr.
+proc(one_plus_c_store)
+    add     byte ptr [rax], 1
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()
+
+; 1-c!  ( addr -- )    decrement the byte at addr.
+proc(one_minus_c_store)
+    sub     byte ptr [rax], 1
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()
+
+; c+!  ( c addr -- )    add low byte of c into the byte at addr.
+proc(c_plus_store)
+    mov     rcx, [rbp]
+    add     byte ptr [rax], cl
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; /mod  ( n1 n2 -- rem quot )    signed divide, returns both
+;     SYMMETRIC division — `cdq+idiv` rounds toward zero. WF32's
+;     source comment says "floored" but its `cdq + idiv` does the same
+;     symmetric thing. Use `fm/mod` for true floored.
+;
+;     Result layout after: TOS = quot (in rax), NOS = rem (at [rbp]).
+;     Stack effect 2→2 (the cells are written in-place).
+proc(slash_mod)
+    mov     rcx, rax            ; divisor → rcx
+    mov     rax, [rbp]          ; dividend → rax
+    cqo                          ; sign-extend rax into rdx:rax
+    idiv    rcx                  ; rax = quot, rdx = rem
+    mov     [rbp], rdx           ; NOS ← rem
+    stk(2, 2)                    ; balanced (2 cells in, 2 cells out)
+    next()
+endp()
+
+; ─── Multi-cell + division batch (ported via port-wf32) ───────────────
+; From WF32 gkernel32.fs:790-870. All ports clean except fm/mod, which
+; uses MASM `@@1 / @@2` anonymous labels + `short` jump hints that the
+; porter doesn't translate — hand-rewritten using JASM scope-local
+; labels (`.L1` / `.L2`).
+
+; d+  ( d1 d2 -- d3 )    signed double add.
+proc(d_plus)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    add     [rbp + 2*cell], rdx
+    adc     rax, rcx
+    stk(4, 2)
+    next()
+endp()
+
+; d+!  ( d addr -- )    add double d into the pair at addr.
+proc(d_plus_store)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    add     [rax], rdx
+    adc     [rax + cell], rcx
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; d-  ( d1 d2 -- d3 )    signed double subtract.
+proc(d_minus)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    sub     [rbp + 2*cell], rdx
+    sbb     rcx, rax
+    mov     rax, rcx
+    stk(4, 2)
+    next()
+endp()
+
+; dnegate  ( d1 -- d2 )    two's-complement negate.
+proc(dnegate)
+    neg     rax
+    neg     qword ptr [rbp]
+    sbb     rax, 0
+    next()
+endp()
+
+; dabs  ( d1 -- d2 )    absolute value of a signed double.
+proc(dabs)
+    test    rax, rax
+    jns     .done
+    neg     rax
+    neg     qword ptr [rbp]
+    sbb     rax, 0
+.done:
+    next()
+endp()
+
+; d2*  ( d1 -- d2 )    shift double left by one.
+proc(d_two_times)
+    shl     qword ptr [rbp], 1
+    rcl     rax, 1
+    next()
+endp()
+
+; d2/  ( d1 -- d2 )    arithmetic shift-right by one.
+proc(d_two_slash)
+    sar     rax, 1
+    rcr     qword ptr [rbp], 1
+    next()
+endp()
+
+; s>d  ( n -- d )    sign-extend single to double.
+proc(s_to_d)
+    cqo
+    mov     [rbp - cell], rax
+    mov     rax, rdx
+    stk(1, 2)
+    next()
+endp()
+
+; um*  ( u1 u2 -- ud )    unsigned 64×64 → 128, low then high.
+;     `mul rcx` (or `mul qword [mem]`) produces rdx:rax = rax * src.
+;     WF32 uses the memory-operand form to avoid an explicit move.
+proc(um_times)
+    mul     qword ptr [rbp]
+    mov     [rbp], rax
+    mov     rax, rdx
+    stk(2, 2)
+    next()
+endp()
+
+; m*  ( n1 n2 -- d )    signed 64×64 → 128.
+;     `imul qword [mem]` is the one-operand signed form (rdx:rax = rax * src).
+proc(m_times)
+    imul    qword ptr [rbp]
+    mov     [rbp], rax
+    mov     rax, rdx
+    stk(2, 2)
+    next()
+endp()
+
+; um/mod  ( ud u -- ur uq )    unsigned 128÷64 → ( rem, quot ).
+;     rdx:rax already holds the dividend (rdx = high, rax = low after
+;     loading); `div rcx` puts quot in rax, rem in rdx.
+proc(um_slash_mod)
+    mov     rcx, rax
+    mov     rdx, [rbp]
+    mov     rax, [rbp + cell]
+    div     rcx
+    mov     [rbp + cell], rdx
+    stk(3, 2)
+    next()
+endp()
+
+; sm/rem  ( d n -- rem quot )    symmetric signed 128÷64.
+;     `idiv rcx` does the signed equivalent of `div`.
+proc(sm_slash_rem)
+    mov     rcx, rax
+    mov     rdx, [rbp]
+    mov     rax, [rbp + cell]
+    idiv    rcx
+    mov     [rbp + cell], rdx
+    stk(3, 2)
+    next()
+endp()
+
+; fm/mod  ( d n -- rem quot )    floored signed 128÷64.
+;     Symmetric idiv plus an adjustment when signs differ and rem ≠ 0:
+;       if sign(dividend) ⊕ sign(divisor) is negative AND rem ≠ 0:
+;           rem += divisor;  quot -= 1
+;     WF32 uses `xor edx eax` (where rdx=high, rax=divisor) purely to
+;     set SF for the `jns` — the actual XOR result is discarded by
+;     the immediately-following `mov ecx eax`. Faithful port; the
+;     `@@1 / @@2` MASM-style labels become JASM scope-local `.same /
+;     .done`.
+proc(fm_slash_mod)
+    mov     rdx, [rbp]              ; rdx = high (dividend top half)
+    mov     rcx, rdx                ; copy of high for sign-test
+    xor     rcx, rax                ; SF = "signs of high and n differ"
+    mov     rcx, rax                ; rcx = divisor (XOR result discarded)
+    mov     rax, [rbp + cell]       ; rax = low (dividend bottom half)
+    jns     .same                   ; signs match → simple idiv
+
+    ; Signs differ — do idiv and then correct toward -∞.
+    idiv    rcx
+    test    rdx, rdx                ; rem == 0?
+    je      .done                   ; if zero, no correction needed
+    add     rdx, rcx                ; rem += divisor
+    sub     rax, 1                  ; quot -= 1
+    jmp     .done
+
+.same:
+    idiv    rcx                     ; signs match — symmetric is already floored
+
+.done:
+    mov     [rbp + cell], rdx       ; store rem under quot
+    stk(3, 2)
+    next()
+endp()
+
+; */  ( n1 n2 n3 -- (n1*n2)/n3 )    multiply-then-divide single result.
+;     The intermediate n1*n2 is held in rdx:rax (full 128 bits), so
+;     overflow only matters if the FINAL quotient doesn't fit in 64
+;     bits. WF32 uses signed multiply + signed divide.
+proc(times_slash)
+    mov     rcx, rax                ; rcx = n3
+    mov     rax, [rbp]              ; rax = n2
+    imul    qword ptr [rbp + cell]  ; rdx:rax = n2 * n1
+    idiv    rcx                     ; rax = quot
+    stk(3, 1)
+    next()
+endp()
+
+; */mod  ( n1 n2 n3 -- rem (n1*n2)/n3 )
+;     Same as */ but also returns the remainder.
+proc(times_slash_mod)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    imul    qword ptr [rbp + cell]
+    idiv    rcx
+    mov     [rbp + cell], rdx       ; rem under quot
+    stk(3, 2)
+    next()
+endp()
+
+; /  ( n1 n2 -- quot )    signed divide, quotient only (symmetric).
+proc(slash)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    cqo
+    idiv    rcx
+    stk(2, 1)
+    next()
+endp()
+
+; mod  ( n1 n2 -- rem )    signed modulus (symmetric — sign of dividend)
+;     Asm sym `mod_` — `mod` is a JASM/MASM reserved-keyword family.
+proc(mod_)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    cqo
+    idiv    rcx
+    mov     rax, rdx
+    stk(2, 1)
+    next()
+endp()

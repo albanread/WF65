@@ -1,0 +1,6 @@
+class base cell ivar: v :m setv v ! ;m :m id 1 ;m end-class
+base new b
+: bid b -> id ;
+0 b !
+bid .
+bye

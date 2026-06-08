@@ -1,0 +1,23 @@
+# Tests in this crate share process-global state that cannot tolerate
+# parallel execution:
+#
+#   * The MCJIT engine and its module memory are per-process; each
+#     Wf64Session creates its own Jit, but LLVM's internals (target
+#     init, RTDyld, the global symbol resolver) are not parallel-safe
+#     when multiple engines materialize in the same process.
+#   * `wfasm::seh` installs ONE Vectored Exception Handler per process
+#     and maintains a single global symbol table for all JITed procs.
+#     Parallel registrations race; symbol resolution under crash dumps
+#     becomes nondeterministic.
+#   * `runtime::CURRENT_IO` is thread-local but `with_io` swaps on
+#     entry/restore on exit — with parallel tests on the same thread
+#     pool, swap ordering is unstable.
+#   * VirtualAlloc2 near-memory allocations target a ±2 GB window
+#     around the kernel; many parallel sessions chew through that
+#     window and fragment future allocations.
+#
+# `--test-threads=1` is the only correct default here. Setting it via
+# CARGO_BUILD_RUSTFLAGS-like config so `cargo test` "just works"
+# without anyone needing to remember the flag.
+[env]
+RUST_TEST_THREADS = "1"

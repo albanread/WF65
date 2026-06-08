@@ -1,0 +1,13 @@
+// Resources embedded into wf64-ui.exe.  Currently:
+//   - The Windows application manifest (DPI awareness, common
+//     controls v6, UTF-8 active code page, supportedOS GUIDs).
+//
+// Built by build.rs via the `embed-resource` crate, which invokes
+// the platform RC compiler (rc.exe on MSVC, windres on MinGW).
+
+#include <winuser.h>
+
+// Manifest resource id 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID.
+// Windows looks for this id on the EXE and uses it as the activation
+// manifest at process startup.
+1 RT_MANIFEST "wf64-ui.exe.manifest"

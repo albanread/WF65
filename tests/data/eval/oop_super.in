@@ -1,0 +1,8 @@
+class animal cell ivar: legs :m legs! legs ! ;m :m speak 7 ;m :m noise legs @ ;m :m describe self -> speak ;m end-class
+animal subclass dog :m speak 9 ;m :m noise super -> noise 100 + ;m end-class
+dog new rex
+4 rex -> legs!
+rex -> speak .
+rex -> describe .
+rex -> noise .
+bye

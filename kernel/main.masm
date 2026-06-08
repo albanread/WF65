@@ -1,0 +1,215 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 — kernel entry point.
+;
+; The Rust driver allocates a 128 MB region near the kernel (within
+; ±2 GB so all calls fit in rel32), lays it out as data stack /
+; return stack / user area / dictionary heap, populates the dictionary
+; with one header per primitive, and calls forth_main:
+;
+;   forth_main(target_xt, logical_dsp_in, rsp_top, user_base) → 0
+;
+; This single entry point handles both REPL invocations (target_xt =
+; quit) and direct primitive invocations from Wf64Session::call(). On
+; return, [UP + user_DSP_SAVE] holds the new logical_dsp the caller
+; should adopt.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+.intel_syntax noprefix
+.text
+
+@include "macros.masm"
+@include "runtime_decls.masm"
+
+; NOTE: no `@include "win32/*.masm"` here. The kernel today calls only
+; the Rust runtime fns declared in runtime_decls.masm (rt_emit, rt_type,
+; rt_read_line, rt_print_int) — every I/O path goes through them. The
+; generated KERNEL32/USER32/etc. bindings under kernel/win32/ stay on
+; disk for whenever a primitive needs a direct Win32 call; include them
+; on demand. Dragging the full kernel32.masm in unconditionally cost us
+; ~1,165 macro expansions + 1,158 LoadLibrary/GetProcAddress/
+; LLVMAddFunction/LLVMAddGlobalMapping per session boot — a multi-second
+; tax for zero gain in the current configuration.
+
+@include "stack.masm"
+@include "rstack.masm"
+@include "memory.masm"
+@include "arith.masm"
+@include "float.masm"
+@include "logic.masm"
+@include "compare.masm"
+@include "strings.masm"
+@include "number.masm"
+@include "io.masm"
+@include "facility.masm"
+@include "fmath.masm"
+@include "locals.masm"
+@include "parse.masm"
+@include "dict.masm"
+@include "execute.masm"
+@include "compile.masm"
+@include "oop.masm"
+@include "gc.masm"
+@include "strings_managed.masm"
+@include "igui.masm"
+@include "igui_gfx.masm"
+@include "interp.masm"
+
+; forth_main(target_xt, logical_dsp_in, rsp_top, user_base)
+;
+; **Wire-format**: the data stack between Rust and the kernel is a
+; pure in-memory array of cells. At depth N: stack[0] (top) lives at
+; [logical_dsp + 0], stack[1] (NOS) at [logical_dsp + cell], etc.,
+; and logical_dsp = dsp_top - N*cell. Depth 0 ↔ logical_dsp == dsp_top.
+;
+; The kernel's internal convention (TOS cached in rax, kernel_DSP
+; points to NOS) is only valid *inside* the kernel — forth_main's
+; prologue/epilogue translate to/from the wire-format:
+;
+;   prologue:  mov TOS, [DSP]; add DSP, cell    ; cache top in rax
+;   epilogue:  sub DSP, cell; mov [DSP], TOS    ; spill top back
+;
+; This is the only general stack-representation translation layer.
+; Inside the kernel, everybody else must speak the internal cached-TOS
+; form only. Rust and the host runtime never see the live internal form;
+; they only see the pure memory stack saved through user_DSP_SAVE.
+;
+; With those bookends, `[UP + user_DSP_SAVE]` after return *is* the
+; logical_dsp the caller should adopt. The Rust harness counts depth
+; as (dsp_top - logical_dsp)/cell — no separate counter needed.
+;
+; The prologue's read of [DSP] on a depth-0 entry reads from the first
+; cell of the return-stack region (harmless — it's mapped memory and
+; the value is don't-care). The epilogue's write on a depth-0 return
+; lands at the last cell of the data-stack region (also harmless —
+; nothing reads it again).
+;
+; Win64 ABI: rcx=target_xt, rdx=logical_dsp_in, r8=rsp_top, r9=user_base.
+; All callee-saved GPRs are preserved.  xmm6-15 (callee-saved per Win64)
+; are SAVED on entry and RESTORED on exit, so Forth FP code — including
+; native LET words and any primitive that wants the high xmm regs — may
+; use xmm6-15 freely without corrupting the host (e.g. Direct2D, which
+; relies on them).  This is the one boundary where they are spilled.
+proc(forth_main)
+    push    rbx
+    push    rbp
+    push    rdi
+    push    rsi
+    push    r12
+    push    r13
+    push    r14
+    push    r15                              ; preserved for the Rust caller
+                                              ; (R15 is reserved as the locals
+                                              ; stack pointer LP inside Forth;
+                                              ; primitives must not scribble on it)
+
+    ; Spill xmm6-15 (10 * 16 = 160 bytes) onto the host stack.  movups is
+    ; used (no 16-alignment requirement); the matching reload is in the
+    ; epilogue, keyed off the same user_HOST_RSP value saved just below.
+    sub     rsp, 160
+    movups  [rsp +   0], xmm6
+    movups  [rsp +  16], xmm7
+    movups  [rsp +  32], xmm8
+    movups  [rsp +  48], xmm9
+    movups  [rsp +  64], xmm10
+    movups  [rsp +  80], xmm11
+    movups  [rsp +  96], xmm12
+    movups  [rsp + 112], xmm13
+    movups  [rsp + 128], xmm14
+    movups  [rsp + 144], xmm15
+
+    ; Install Forth registers.
+    mov     UP,  r9
+    mov     [UP + user_HOST_RSP], rsp
+    mov     DSP, rdx
+    ; Load the locals stack pointer (R15 = LP).  Initialized by the Rust
+    ; host to point one past the top of the locals region; locals frames
+    ; allocate by `sub r15, N*cell` on entry and `add r15, N*cell` before
+    ; `next()`.  Win64 callouts (msvcrt / kernel32) preserve R15, so it
+    ; survives across all external calls without spilling.
+    mov     r15, [UP + user_LP0]
+    ; Restore the Forth return-stack pointer so any cells `>r` left
+    ; from a previous forth_main invocation are still visible. The
+    ; r8 argument (rsp_top) is ignored — the boot path seeds
+    ; user_RSP_CURRENT with rsp_top once, and the kernel maintains it
+    ; from then on.
+    mov     rsp, [UP + user_RSP_CURRENT]
+
+    ; Prologue: translate Rust's memory-only stack into the internal
+    ; cached-TOS form. After this:
+    ;   input depth 0 -> internal depth 0 (DSP = SP0 + cell)
+    ;   input depth 1 -> internal depth 1 (DSP = SP0, TOS = item)
+    ;   input depth N -> internal depth N with DSP pointing at NOS
+    mov     TOS, [DSP]
+    add     DSP, cell
+
+    ; Install a synthetic root catch/throw frame in the user area so
+    ; uncaught THROWs unwind back through forth_main without polluting
+    ; the live Forth return stack seen by rstack words.
+    mov     r10, [UP + user_HANDLER]
+    lea     r11, [UP + user_ROOT_HANDLER]
+    mov     [r11], r10
+    mov     [r11 + cell], DSP
+    lea     r10, [rip + .throw_return]
+    mov     [r11 + 2*cell], r10
+    mov     [UP + user_HANDLER], r11
+    mov     qword ptr [UP + user_THROW_CODE], 0
+
+    call    rcx
+
+    ; Normal return: tear down the root handler frame.
+    mov     r10, [UP + user_ROOT_HANDLER]
+    mov     [UP + user_HANDLER], r10
+    jmp     .spill_and_return
+
+.throw_return:
+    ; Uncaught THROW landed here. DSP was restored by THROW and TOS is
+    ; the throw code. Record it for the Rust host and restore the
+    ; outer Forth return stack pointer.
+    mov     [UP + user_THROW_CODE], TOS
+    mov     rsp, [UP + user_RSP_CURRENT]
+
+.spill_and_return:
+    ; Epilogue: translate the internal cached-TOS form back into the
+    ; memory-only wire format Rust expects, then publish logical_dsp.
+    sub     DSP, cell
+    mov     [DSP], TOS
+    mov     [UP + user_DSP_SAVE], DSP
+
+    ; Persist the Forth rstack pointer for the next call.
+    mov     [UP + user_RSP_CURRENT], rsp
+
+    ; Restore host's RSP, then reload the spilled xmm6-15 (user_HOST_RSP
+    ; points at the 160-byte xmm save area from the prologue), then the
+    ; callee-saved GPRs.
+    mov     rsp, [UP + user_HOST_RSP]
+    movups  xmm6,  [rsp +   0]
+    movups  xmm7,  [rsp +  16]
+    movups  xmm8,  [rsp +  32]
+    movups  xmm9,  [rsp +  48]
+    movups  xmm10, [rsp +  64]
+    movups  xmm11, [rsp +  80]
+    movups  xmm12, [rsp +  96]
+    movups  xmm13, [rsp + 112]
+    movups  xmm14, [rsp + 128]
+    movups  xmm15, [rsp + 144]
+    add     rsp, 160
+    pop     r15
+    pop     r14
+    pop     r13
+    pop     r12
+    pop     rsi
+    pop     rdi
+    pop     rbp
+    pop     rbx
+    xor     eax, eax
+    ret
+endp()

@@ -1,0 +1,86 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — iGui bridge primitives.
+;
+; Forth-side wrappers for calls into the wf64-ui front-end.  None of
+; this is wired up in the headless `wf64` binary — only `wf64-ui`
+; spawns the iGui frame and its worker thread.  When the iGui
+; substrate isn't present the Rust runtime fns are no-ops, so
+; calling these from headless Forth costs nothing but the indirect
+; jump.
+;
+; Throw codes: none specific.  These primitives never fail —
+; they're side-effect-only.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+
+; page  ( -- )
+;     Clear the console scrollback.  Equivalent to a terminal's
+;     "clear screen."  Cursor returns implicitly to the top-left
+;     of the now-empty screen on the next emit.
+;
+;     Save/restore TOS around the call — `call` clobbers RAX (our
+;     TOS) with the runtime's return value.  Without this a
+;     naive 0-in-0-out wrapper silently zeros whatever was on top
+;     of the data stack.
+proc(page_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_igui_page)
+    mov     TOS, [DSP - cell]
+    next()
+endp()
+
+
+; at-xy  ( col row -- )
+;     Reposition the cursor for the next emit.  V1 limitation: the
+;     subsequent text emits don't yet route through the position
+;     hook (the IO buffer is batch-flushed at end-of-eval).  This
+;     primitive records the requested position so PAGE+AT-XY-aware
+;     programs don't throw; full streaming-emit support comes in
+;     a follow-up to the IO subsystem.
+proc(at_xy_word)
+    ; Stack: row in TOS, col at [DSP].
+    mov     rcx, [DSP]                              ; col
+    mov     rdx, TOS                                ; row
+    win64_call(rt_igui_at_xy)
+    ; Drop both args.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+endp()
+
+
+; bug-rust-panic  ( -- )
+;     Manually-triggerable Rust panic, for verifying the wf64-ui
+;     crash-handler path.  Never returns (the worker thread's
+;     catch_unwind catches the panic, drops the session, opens
+;     the crash-dump window).  Process stays alive.
+proc(bug_rust_panic_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_bug_rust_panic)
+    mov     TOS, [DSP - cell]
+    next()
+endp()
+
+
+; bug-seh-av  ( -- )
+;     Trigger a real Windows ACCESS_VIOLATION (NULL pointer read)
+;     from inside the worker thread.  For verifying Phase 3b's
+;     VEH-based SEH recovery — the worker thread should be
+;     terminated and respawned by the supervisor, with the
+;     captured register state shown in the crash dump window.
+;     Process stays alive.  Never call from production code.
+proc(bug_seh_av_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_bug_seh_av)
+    mov     TOS, [DSP - cell]
+    next()
+endp()

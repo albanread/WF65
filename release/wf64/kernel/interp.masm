@@ -1,0 +1,381 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — interpreter loop.
+;
+; quit reads a line, parses it into whitespace-delimited tokens, and
+; dispatches each:
+;   1. find-name → if found, execute
+;   2. else number? → if valid number, leave on stack
+;   3. else → print "? ", discard the token, continue
+;
+; After processing all tokens on a line, prints " ok\n" and loops.
+;
+; Stack discipline: every path through .tokens is careful to land back
+; at depth D (where D is the depth at iteration start) when the token
+; was unrecognised, at D+1 when it was a number literal, or at
+; D-in+out when it was a primitive (the primitive's own effect).
+;
+; All printing goes through `type` (which takes addr+len) rather than
+; chained `emit` calls — chained emits stomp on each other's TOS via
+; the call-clobbered RAX.
+;
+; Interpreter dispatch rule: this loop may use the data stack for
+; temporary routing state while deciding what a token means, so the
+; post-routing DSP alone is not always enough to reconstruct the token
+; entry depth. Any path that dispatches into `execute` therefore has to
+; preserve or reconstruct the internal empty/depth-1 distinction before
+; the jump.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+proc(interpret_source)
+.tokens:
+    ; Cooperative bye check (also covers the case where bye was called
+    ; mid-source by a primitive or compiled word).
+    cmp     qword ptr [UP + user_BYE_REQ], 0
+    jne     .done
+
+    ; Remember whether token entry had a real TOS. After parse-name,
+    ; find-name, number?, and float? route a token, DSP may be back at
+    ; the same numeric value for two different logical cases:
+    ;   - truly empty internal stack (DSP = SP0 + cell)
+    ;   - one real item cached in TOS (DSP = SP0)
+    ; r13 is the tie-breaker for the later execute paths.
+    xor     r13d, r13d
+    cmp     DSP, [UP + user_SP0]
+    ja      .stack_empty
+    mov     r13d, 1
+.stack_empty:
+
+    call    parse_name                       ; ( -- c-addr u )
+    test    TOS, TOS                         ; u == 0?
+    jz      .end_source
+
+    ; In compile state with locals active, try the locals table first.
+    ; On a match it emits a 15-byte inline fetch into the current colon
+    ; def and returns true; we just drop the flag and grab the next
+    ; token. On a miss it leaves (c-addr u) intact for find_name below.
+    cmp     qword ptr [UP + user_STATE], 0
+    jz      .skip_locals_check
+    cmp     qword ptr [UP + user_LOCALS_COUNT], 0
+    jz      .skip_locals_check
+    call    check_local_emit_word
+    test    TOS, TOS
+    jz      .locals_miss
+    ; Matched -- drop the true flag and resume the token loop.
+    mov     TOS, [DSP]
+    add     DSP, cell
+    jmp     .tokens
+.locals_miss:
+    ; Not a local. Drop the false flag, leaving (c-addr u).
+    mov     TOS, [DSP]
+    add     DSP, cell
+.skip_locals_check:
+
+    call    find_name                        ; ( c-addr u -- nt -1 | c-addr u 0 )
+    test    TOS, TOS
+    jnz     .found_word
+
+    ; Not in the dictionary. Drop the 0 flag; (c-addr u) is still on stack.
+    mov     TOS, [DSP]
+    add     DSP, cell
+
+    call    number_q                         ; ( c-addr u -- n -1 | c-addr u 0 )
+    test    TOS, TOS
+    jnz     .got_number
+
+    ; Not an integer. Drop the 0 flag and try a decimal float.
+    mov     TOS, [DSP]
+    add     DSP, cell
+
+    call    float_q                          ; ( c-addr u -- -1 | c-addr u 0 ) ( F: -- r )
+    test    TOS, TOS
+    jnz     .got_float
+
+    ; Not a number either. Stack: ( c-addr u 0 ), with the caller's
+    ; original TOS preserved at NNNOS. Drop all 3 and restore it.
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+
+    ; Print "? " via type ( addr len -- )
+    mov     [DSP - cell], TOS
+    lea     rcx, [rip + .qmark_str]
+    mov     [DSP - 2*cell], rcx
+    mov     TOS, 2
+    sub     DSP, 2*cell
+    call    type_word
+    jmp     .tokens
+
+.found_word:
+    mov     TOS, [DSP]
+    add     DSP, cell
+    lea     r9, [TOS - dh_nt]
+    mov     rcx, [r9 + dh_ct]
+    mov     rdx, [r9 + dh_xtptr]
+    mov     r8,  [UP + user_STATE]
+    test    r13d, r13d
+    jz      .found_empty
+    mov     TOS, [DSP]
+    add     DSP, cell
+    jmp     .found_ready
+.found_empty:
+    ; Token entry was internally empty. find-name produced exactly
+    ; ( nt -1 ) and there is no prior real TOS to restore here.
+    ; Drop nt as well, leaving DSP in the internal empty form. Treat
+    ; TOS as don't-care until the selected dispatch path installs its
+    ; own live value.
+    add     DSP, cell
+.found_ready:
+    test    r8, r8
+    jz      .exec_xt
+    lea     r10, [rip + execute]
+    cmp     rcx, r10
+    jne     .compile_ct
+    test    r13d, r13d
+    jz      .compile_exec_empty
+
+.compile_ct:
+    mov     [DSP - cell], TOS
+    mov     TOS, rdx
+    sub     DSP, cell
+    call    rcx
+    jmp     .after_word
+
+.compile_exec_empty:
+    ; Immediate words use ct = execute. When the logical data stack is
+    ; empty, normalize to internal depth 0 and don't manufacture a fake
+    ; NOS cell just to feed execute.
+    cmp     DSP, [UP + user_SP0]
+    ja      .compile_exec_ready
+    add     DSP, cell                       ; normalize to internal empty-stack form
+.compile_exec_ready:
+    mov     TOS, rdx
+    call    rcx
+    jmp     .after_word
+
+.exec_xt:
+    ; ── Empty-stack guard ─────────────────────────────────────────────
+    ; When token entry was logically empty, TOS is just the stale value
+    ; loaded by forth_main's prologue. Spilling it here would fabricate
+    ; a fake NOS cell below xt. Therefore the empty-token path first
+    ; normalizes to internal depth 0 and then calls execute with xt as
+    ; the only real item. The non-empty path is allowed to spill.
+    ;
+    ; ── Trace hook ───────────────────────────────────────────────────
+    ; r9 still holds the header base from .found_word; nt = r9 + dh_nt.
+    ; rdx = xt. rt_forth_trace clobbers all caller-saved regs — the
+    ; non-empty path pre-spills TOS before the call so it survives.
+    ; The empty path skips the spill entirely.
+    cmp     qword ptr [UP + user_TRACE], 0
+    jz      .do_exec
+    push    rdx                             ; save xt across the Win64 call
+    test    r13d, r13d
+    jz      .trace_empty
+    mov     [DSP - cell], TOS               ; pre-spill user TOS (becomes NOS after sub)
+    lea     rcx, [r9 + dh_nt]               ; arg1 = nt
+    mov     rdx, TOS                        ; arg2 = current TOS
+    mov     r8,  DSP                        ; arg3 = DSP
+    mov     r9,  [UP + user_SP0]            ; arg4 = SP0
+    win64_call(rt_forth_trace)
+    pop     rdx                             ; restore xt
+    mov     TOS, rdx
+    sub     DSP, cell                       ; commit spilled NOS
+    call    execute
+    jmp     .after_word
+.trace_empty:
+    ; Stack is empty — don't create a fake NOS cell.
+    cmp     DSP, [UP + user_SP0]
+    ja      .trace_empty_ready
+    add     DSP, cell                       ; normalize to internal empty-stack form
+.trace_empty_ready:
+    lea     rcx, [r9 + dh_nt]               ; arg1 = nt
+    mov     rdx, TOS                        ; arg2 = stale TOS (display only)
+    mov     r8,  DSP                        ; arg3 = DSP
+    mov     r9,  [UP + user_SP0]            ; arg4 = SP0
+    win64_call(rt_forth_trace)
+    pop     rdx                             ; restore xt
+    mov     TOS, rdx                        ; TOS = xt; DSP stays at SP0
+    call    execute
+    jmp     .after_word
+.do_exec:
+    test    r13d, r13d
+    jz      .exec_empty
+    mov     [DSP - cell], TOS
+    mov     TOS, rdx
+    sub     DSP, cell
+    call    execute
+    jmp     .after_word
+.exec_empty:
+    cmp     DSP, [UP + user_SP0]
+    ja      .exec_empty_ready
+    add     DSP, cell                       ; normalize to internal empty-stack form
+.exec_empty_ready:
+    mov     TOS, rdx                        ; TOS = xt; DSP stays at SP0
+    call    execute
+    jmp     .after_word
+
+.after_word:
+    mov     r8, [UP + user_PARSE_BARRIER]
+    test    r8, r8
+    jz      .tokens
+    cmp     [UP + user_TO_IN], r8
+    jae     .clear_parse_barrier
+    mov     [UP + user_TO_IN], r8
+.clear_parse_barrier:
+    mov     qword ptr [UP + user_PARSE_BARRIER], 0
+    jmp     .tokens
+
+.got_number:
+    mov     TOS, [DSP]
+    add     DSP, cell
+    mov     r8, [UP + user_STATE]
+    test    r8, r8
+    jz      .tokens
+    call    literal
+    jmp     .tokens
+
+.got_float:
+    mov     TOS, [DSP]
+    add     DSP, cell
+    mov     r8, [UP + user_STATE]
+    test    r8, r8
+    jz      .tokens
+    call    fliteral
+    jmp     .tokens
+
+.end_source:
+    test    r13d, r13d
+    jz      .end_source_empty
+    mov     TOS, [DSP + cell]
+.end_source_empty:
+    add     DSP, 2*cell
+
+.done:
+    ret
+
+.qmark_str:
+    .ascii "? "
+endp()
+
+; quit  ( -- )
+;     The REPL loop. Doesn't return under normal operation; `bye`
+;     calls ExitProcess to leave.
+proc(quit)
+
+.again:
+    ; Cooperative bye check.
+    cmp     qword ptr [UP + user_BYE_REQ], 0
+    jne     .bye_return
+
+    ; ── Read a line: accept ( c-addr n -- n' ) ─────────────────────
+    ; Push args. Slot rule: [rbp - 16] becomes new NOS after sub.
+    mov     [DSP - cell], TOS                ; old TOS → NNOS slot
+    lea     rcx, [UP + user_SOURCE_BUF]
+    mov     [DSP - 2*cell], rcx              ; addr → NOS slot
+    mov     TOS, source_buf_size             ; n
+    sub     DSP, 2*cell
+    call    accept                           ; ( -- n' )
+
+    ; EOF check: rt_read_line returns -1 (u64::MAX) on EOF. 0 is a
+    ; valid empty-line return and must NOT terminate the REPL.
+    cmp     TOS, -1
+    jne     .have_line
+    ; Drop the -1, request bye, loop (the bye-flag check at the top
+    ; of .again will return from quit).
+    mov     TOS, [DSP]
+    add     DSP, cell
+    call    bye
+    jmp     .again
+
+.have_line:
+    ; Install the read line as SOURCE.
+    mov     [UP + user_SOURCE_LEN], rax
+    lea     rcx, [UP + user_SOURCE_BUF]
+    mov     [UP + user_SOURCE_ADDR], rcx
+    mov     qword ptr [UP + user_TO_IN], 0
+
+    ; Drop n' (we don't keep it on the data stack).
+    mov     TOS, [DSP]
+    add     DSP, cell
+
+    call    interpret_source
+
+    cmp     qword ptr [UP + user_BYE_REQ], 0
+    jne     .bye_return
+
+    ; Print " ok\n" via type
+    mov     [DSP - cell], TOS                ; spill
+    lea     rcx, [rip + .ok_str]
+    mov     [DSP - 2*cell], rcx
+    mov     TOS, 4                           ; "<space>ok<LF>"
+    sub     DSP, 2*cell
+    call    type_word
+
+    jmp     .again
+
+.bye_return:
+    ; Bye-flag landing pad. Return from quit; forth_main returns to
+    ; its Rust caller, which decides what to do next.
+    ret
+
+    ; ── Inline string literals (after the loop's unconditional jmp,
+    ;    so execution never falls through them) ──────────────────────
+.ok_str:
+    .ascii " ok"
+    .byte 10
+endp()
+
+proc(evaluate_word)
+    pop     rcx                              ; save our return address
+    mov     r8,  [UP + user_SOURCE_ID]
+    mov     r9,  [UP + user_SOURCE_ADDR]
+    mov     r10, [UP + user_SOURCE_LEN]
+    mov     r11, [UP + user_TO_IN]
+    push    r8
+    push    r9
+    push    r10
+    push    r11
+    push    rcx                              ; restore return address to top
+
+    mov     rcx, [DSP]                       ; c-addr
+    mov     [UP + user_SOURCE_ADDR], rcx
+    mov     [UP + user_SOURCE_LEN], TOS      ; u
+    mov     qword ptr [UP + user_SOURCE_ID], -1
+    mov     qword ptr [UP + user_TO_IN], 0
+
+    mov     TOS, [DSP + cell]                ; drop c-addr u
+    add     DSP, 2*cell
+
+    mov     [DSP - cell], TOS
+    lea     TOS, [rip + interpret_source]
+    sub     DSP, cell
+    call    catch_word
+
+    pop     rcx                              ; saved return address
+    pop     r11                              ; old >IN
+    pop     r10                              ; old SOURCE-LEN
+    pop     r9                               ; old SOURCE-ADDR
+    pop     r8                               ; old SOURCE-ID
+    push    rcx
+    mov     [UP + user_SOURCE_ID], r8
+    mov     [UP + user_SOURCE_ADDR], r9
+    mov     [UP + user_SOURCE_LEN], r10
+    mov     [UP + user_TO_IN], r11
+
+    test    TOS, TOS
+    jnz     .rethrow
+    mov     TOS, [DSP]
+    add     DSP, cell
+    next()
+
+.rethrow:
+    call    throw_word
+    next()
+endp()

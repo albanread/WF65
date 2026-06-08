@@ -1,0 +1,15 @@
+# Calling `:` while STATE != 0 must throw -29 (compiler nesting)
+# instead of silently re-entering compile mode and corrupting
+# the dictionary.  Exercise via a compiled-body word that
+# fakes compile state, executes colon under CATCH, and
+# restores STATE — wrapping in a colon-def keeps the interpret
+# loop running in interpret state throughout.
+# requires: ' catch state
+: provoke-nest   ( -- throw-code )
+    state @ >r
+    1 state !
+    ['] : catch
+    r> state !
+;
+provoke-nest . cr
+bye

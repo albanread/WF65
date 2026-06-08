@@ -1,0 +1,8 @@
+# requires: hex decimal octal
+hex
+2a .
+decimal
+42 .
+octal
+10 .
+bye

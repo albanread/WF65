@@ -1,0 +1,6 @@
+class scoped cell ivar: secret :m stash 42 secret ! ;m :m fetch secret @ ;m end-class
+scoped new sc
+sc -> stash
+sc -> fetch .
+[defined] secret .
+bye

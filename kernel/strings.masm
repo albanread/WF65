@@ -1,0 +1,705 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — bit ops, cell-size helpers, and string primitives.
+;
+; All ports start from `cargo run --bin port-wf32`. Manual fixes:
+;   - `rep movs byte` / `rep stos byte` (WF32 MASM-style operand
+;     spelling) → `rep movsb` / `rep stosb` (LLVM-MC mnemonic spelling).
+;   - WF32 RPN immediates (`cell msbit`, `cell 1-`) that the porter
+;     does not evaluate — substituted with concrete WF64 values
+;     (`3` for log2(cell); `cell - 1` for the alignment mask).
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─── Bit ops (gkernel32.fs:537-555) ───────────────────────────────────
+
+; count-bits  ( n -- bits )    population count
+proc(count_bits)
+    popcnt  rax, rax
+    stk(1, 1)
+    next()
+endp()
+
+; msbit  ( n -- msb )    index of highest set bit; -1 if n==0
+;     `bsr` scans for the most-significant 1 bit. ZF=1 if input was 0,
+;     in which case rax is undefined — use a saturating sentinel via
+;     `or rcx, -1; cmovz rax, rcx`.
+proc(msbit)
+    or      rcx, -1
+    bsr     rax, rax
+    cmovz   rax, rcx
+    stk(1, 1)
+    next()
+endp()
+
+; lsbit  ( n -- lsb )    index of lowest set bit; -1 if n==0
+proc(lsbit)
+    or      rcx, -1
+    bsf     rax, rax
+    cmovz   rax, rcx
+    stk(1, 1)
+    next()
+endp()
+
+; ─── Cell-size helpers (gkernel32.fs:853-907) ─────────────────────────
+
+; cells  ( n -- n*cell )    multiply by cell-size.
+;     WF32 source: `sal eax cell msbit` — shift left by log2(cell).
+;     For cell=8 that's 3; the metacompiler evaluated `msbit(cell)`
+;     at compile time. Hand-substituted the concrete value.
+proc(cells)
+    shl     rax, 3
+    stk(1, 1)
+    next()
+endp()
+
+; cells+  ( addr n -- addr+n*cell )
+proc(cells_plus)
+    mov     rcx, [rbp]
+    lea     rax, [rcx + rax*cell]
+    stk(2, 1)
+    next()
+endp()
+
+; +cells  ( n addr -- addr+n*cell )
+proc(plus_cells)
+    mov     rcx, [rbp]
+    lea     rax, [rax + rcx*cell]
+    stk(2, 1)
+    next()
+endp()
+
+; cells-  ( addr n -- addr-n*cell )
+proc(cells_minus)
+    lea     rcx, [rax*cell]
+    mov     rax, [rbp]
+    sub     rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; cell+  ( addr -- addr+cell )
+proc(cell_plus)
+    add     rax, cell
+    stk(1, 1)
+    next()
+endp()
+
+; cell-  ( addr -- addr-cell )
+proc(cell_minus)
+    sub     rax, cell
+    stk(1, 1)
+    next()
+endp()
+
+; aligned  ( addr -- a-addr )    round UP to next cell boundary.
+;     WF32 source: `add eax cell 1-` followed by `and eax -cell` —
+;     the `cell 1-` is RPN for `cell - 1`. Add the mask, then clear
+;     the low bits.
+proc(aligned)
+    add     rax, cell - 1
+    and     rax, -cell
+    stk(1, 1)
+    next()
+endp()
+
+; -aligned  ( addr -- a-addr )    round DOWN to a cell boundary.
+proc(minus_aligned)
+    and     rax, -cell
+    stk(1, 1)
+    next()
+endp()
+
+; naligned  ( addr n -- a-addr )    round UP to an n-byte boundary.
+proc(naligned)
+    lea     rcx, [rax - 1]
+    neg     rax
+    add     rcx, [rbp]
+    and     rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; char+  ( c-addr -- c-addr+1 )
+;     Not a `code` word in WF32 (defined in the Forth-side stdlib as
+;     `: char+ 1+ ;` there). Inline here as a thin proc so PRIMITIVES
+;     can map `char+` → `char_plus` cleanly. Same code as `1+`.
+proc(char_plus)
+    add     rax, 1
+    stk(1, 1)
+    next()
+endp()
+
+; chars  ( n -- n )    no-op on byte-sized chars
+;     Identity. Exists so portable Forth code can write `2 chars`
+;     for "two characters' worth of bytes" and have it mean 2.
+proc(chars)
+    stk(1, 1)
+    next()
+endp()
+
+; ─── String primitives (gkernel32.fs:914-963, 1278) ───────────────────
+
+; fill  ( c-addr u byte -- )    write `byte` into `u` consecutive bytes
+;     WF32: `rep stos byte`. LLVM-MC wants `rep stosb` as one token.
+;     Win64 caller doesn't expect rdi to be preserved; we use it freely.
+proc(fill)
+    mov     rcx, [rbp]              ; rcx = u (count)
+    mov     rdi, [rbp + cell]       ; rdi = c-addr
+    rep     stosb
+    mov     rax, [rbp + 2*cell]     ; raise NNNOS into TOS
+    stk(3, 0)
+    next()
+endp()
+
+; cmove  ( src dst u -- )    copy u bytes src → dst, forward
+proc(cmove)
+    mov     rdi, [rbp]              ; rdi = dst
+    mov     rsi, [rbp + cell]       ; rsi = src
+    mov     rcx, rax                ; rcx = u
+    rep     movsb
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; cmove>  ( src dst u -- )    copy u bytes src → dst, BACKWARD
+;     Set DF=1 (std), copy from the END of each range backwards,
+;     then clear DF (cld) so it doesn't leak into other code.
+;     Use when dst > src and ranges overlap; cmove would clobber.
+proc(cmove_to)
+    mov     rdi, [rbp]              ; rdi = dst
+    mov     rsi, [rbp + cell]       ; rsi = src
+    lea     rdi, [rax + rdi - 1]    ; rdi = dst + u - 1 (last byte)
+    lea     rsi, [rax + rsi - 1]    ; rsi = src + u - 1
+    mov     rcx, rax
+    std                              ; descending direction
+    rep     movsb
+    cld                              ; restore default direction
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; count  ( c-addr -- c-addr+1 u )    read counted string header
+;     A "counted string" in Forth is a length byte followed by chars.
+;     Take the length, advance the address past it.
+proc(count)
+    add     rax, 1                          ; advance past length byte
+    mov     [rbp - cell], rax               ; new NOS = addr+1
+    movzx   rax, byte ptr [rax - 1]         ; new TOS = length byte
+    stk(1, 2)
+    next()
+endp()
+
+; ─── String batch 2 (ported via port-wf32) ────────────────────────────
+; All from WF32 gkernel32.fs:809-2223. Ports were mostly clean once the
+; porter learned `rep <op> <size>` → `rep <op><sfx>`, `@@N` → `.LN`,
+; and `short` stripping. Only `move` needed a substantive rewrite —
+; see comment there.
+
+; move  ( src dst u -- )    copy u bytes, picking direction by overlap
+;     WF32 source uses a `rep movsd + and ecx 3; rep movsb` two-phase
+;     loop for the forward path (32-bit-cell-sized chunks). On x86-64
+;     with ERMS/FSRM (any post-Ivy-Bridge CPU), `rep movsb` is at least
+;     as fast for typical buffer sizes — and a lot easier to read.
+;     Use the simpler form for both paths.
+;
+;     Direction choice: if `(dst - src)` (unsigned) <= len, ranges
+;     overlap such that forward copy would clobber unread source bytes.
+;     Use `cmove>` semantics (backward) in that case.
+proc(move)
+    mov     rdi, [rbp]              ; rdi = dst
+    mov     rsi, [rbp + cell]       ; rsi = src
+    mov     rcx, rdi
+    sub     rcx, rsi                ; rcx = dst - src (unsigned)
+    cmp     rcx, rax                ; (dst-src) vs len
+    mov     rcx, rax                ; rcx = len (cmp flags preserved)
+    jbe     .overlap
+    rep     movsb
+    jmp     .done
+.overlap:
+    lea     rdi, [rdi + rax - 1]    ; last byte of dst
+    lea     rsi, [rsi + rax - 1]    ; last byte of src
+    std
+    rep     movsb
+    cld
+.done:
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; zcount  ( z-addr -- addr len )    NUL-terminated string → (addr, strlen)
+;     `repnz scasb` scans rdi while rcx != 0 and [rdi-1] != al. Start
+;     with rcx = -1 (scan effectively forever); after the find, rcx
+;     holds -(strlen+2). `lea rax, [rcx + 2]; neg rax` recovers strlen.
+proc(zcount)
+    mov     [rbp - cell], rax       ; original addr → NOS slot (unchanged)
+    mov     rdi, rax
+    or      rcx, -1
+    xor     rax, rax                ; al = NUL search target
+    repnz   scasb
+    lea     rax, [rcx + 2]
+    neg     rax                     ; rax = strlen
+    stk(1, 2)
+    next()
+endp()
+
+; lastchar  ( c-str -- char )    last character of a COUNTED string
+;     Length byte is the first byte at c-str; the last char is at
+;     c-str + length (not length-1, because index includes the count byte).
+proc(lastchar)
+    movzx   rcx, byte ptr [rax]
+    movzx   rax, byte ptr [rax + rcx]
+    stk(1, 1)
+    next()
+endp()
+
+; slastchar  ( addr len -- char )    last char of a (addr, len) s-string
+proc(slastchar)
+    mov     rcx, [rbp]              ; NOS = addr
+    movzx   rax, byte ptr [rax + rcx - 1]
+    stk(2, 1)
+    next()
+endp()
+
+; exchange  ( addr1 addr2 -- )    swap the cells at two addresses
+proc(exchange)
+    mov     rcx, [rbp]              ; rcx = addr1 (NOS)
+    mov     rdx, [rax]              ; rdx = *addr2
+    mov     rdi, [rcx]              ; rdi = *addr1
+    mov     [rax], rdi              ; *addr2 = old *addr1
+    mov     [rcx], rdx              ; *addr1 = old *addr2
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; bounds  ( addr len -- lim first )    do-loop bounds: (addr+len, addr)
+;     One-instruction implementation via `xadd`: it adds rax to [rbp]
+;     AND swaps the original [rbp] into rax atomically — exactly the
+;     two writes we need.
+proc(bounds)
+    xadd    [rbp], rax              ; [rbp] ← addr+len ; rax ← old addr
+    stk(2, 2)
+    next()
+endp()
+
+; /string  ( addr len n -- addr' len' )    advance addr by n, shrink len by n
+;     Clamps n to len if it would underflow. Negative n is ignored
+;     (skips clamp, but `add` of a negative is allowed — caller
+;     accepts the semantics).
+proc(slash_string)
+    mov     rcx, [rbp]              ; rcx = old len
+    test    rax, rax
+    jle     .L9
+    cmp     rax, rcx
+    cmova   rax, rcx                ; clamp n to len if n > len
+.L9:
+    add     [rbp + cell], rax       ; addr += n (in NNOS slot)
+    sub     rcx, rax                ; new len
+    mov     rax, rcx
+    stk(3, 2)
+    next()
+endp()
+
+; ─── String search/compare batch (ported via port-wf32) ───────────────
+; All from gkernel32.fs:1396-1542. Two porter improvements landed
+; alongside this batch:
+;   - `<label>: next;` glued onto one line preserves the label as a
+;     bare definition so any branch into it survives.
+;   - `$N` WF32 hex shorthand rewrites to `0xN`.
+; istr= deferred — it references a 256-byte ucasetab table we have
+; not ported yet. WF32's table only folds ASCII a-z to A-Z and leaves
+; every other byte unchanged, so inline that mapping here and keep the
+; full table deferred until the wider translation machinery lands.
+
+; compare  ( a1 len1 a2 len2 -- n )    case-sensitive triadic compare.
+;     0 = equal, -1 if a1 < a2, 1 if a1 > a2.
+proc(compare)
+    mov     rdi, [rbp]
+    mov     rcx, [rbp + cell]
+    mov     rsi, [rbp + 2*cell]
+    cmp     rcx, rax
+    cmova   rcx, rax            ; cmp-len = min(len1, len2)
+    mov     rdx, 1
+    cmova   rax, rdx            ; tentative greater (a1 longer)
+    mov     rdx, 0
+    cmovz   rax, rdx            ; equal-length default → 0
+    mov     rdx, -1
+    cmovb   rax, rdx            ; a1 shorter → less
+    repz    cmpsb               ; scan while equal
+    mov     rsi, 1
+    cmovb   rax, rdx            ; byte less → -1
+    cmova   rax, rsi            ; byte greater → +1
+    stk(4, 1)
+    next()
+endp()
+
+; str=  ( a1 len1 a2 len2 -- flag )    equality (length + byte-by-byte)
+;
+;     Diverges from WF32 in ONE place: when both lengths are 0, WF32
+;     returns 0 (because `repz cmpsb` is skipped when rcx==0, leaving
+;     ZF=0 from the preceding `or eax,-1` and the `je @@9` not taken
+;     — falls through to xor → false). That's a degenerate corner
+;     case and not what any reasonable consumer wants; "" = "" should
+;     be true. Add an explicit zero-length-trivial-true short-circuit.
+proc(str_equal)
+    mov     rcx, [rbp + cell]
+    cmp     rax, rcx
+    jne     .false
+    test    rax, rax            ; both lengths equal — are they zero?
+    jz      .true               ; "" == "" → true
+    mov     rdi, [rbp]
+    mov     rsi, [rbp + 2*cell]
+    repz    cmpsb
+    jne     .false
+.true:
+    or      rax, -1
+    jmp     .done
+.false:
+    xor     rax, rax
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; istr=  ( a1 len1 a2 len2 -- flag )    ASCII case-insensitive equality.
+;
+;     Mirrors WF32's semantics: compare lengths first, then walk the
+;     strings from end to start. Bytes that differ get folded through
+;     the same ASCII-only a-z -> A-Z mapping WF32's `ucasetab` applies;
+;     all other bytes pass through unchanged.
+proc(istr_equal)
+    cmp     rax, [rbp + cell]
+    jne     .false
+    mov     rdi, [rbp]
+    mov     rsi, [rbp + 2*cell]
+
+.loop:
+    sub     rax, 1
+    jb      .true
+    movzx   ecx, byte ptr [rdi + rax]
+    movzx   edx, byte ptr [rsi + rax]
+    cmp     ecx, edx
+    je      .loop
+
+    cmp     ecx, 'a'
+    jb      .left_folded
+    cmp     ecx, 'z'
+    ja      .left_folded
+    sub     ecx, 0x20
+
+.left_folded:
+    cmp     edx, 'a'
+    jb      .right_folded
+    cmp     edx, 'z'
+    ja      .right_folded
+    sub     edx, 0x20
+
+.right_folded:
+    cmp     ecx, edx
+    je      .loop
+
+.false:
+    xor     rax, rax
+    jmp     .done
+
+.true:
+    or      rax, -1
+
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; tr  ( addr len table -- )    translate a buffer in place.
+;     Mirrors WF32: walk from the end of the buffer toward the start,
+;     use each source byte as an index into the 256-byte translation
+;     table, and write the translated byte back in place.
+proc(tr)
+    mov     rsi, [rbp]                  ; len
+    mov     rdi, [rbp + cell]           ; addr
+.loop:
+    sub     rsi, 1
+    js      .done
+    movzx   rdx, byte ptr [rdi + rsi]
+    movzx   rcx, byte ptr [rax + rdx]
+    mov     byte ptr [rdi + rsi], cl
+    jnz     .loop                       ; flags still from the `sub`
+.done:
+    mov     rax, [rbp + 2*cell]        ; restore old TOS under the args
+    stk(3, 0)
+    next()
+endp()
+
+; upc  ( char -- char )    ASCII uppercase fold for one byte.
+;     Mirrors WF32's `ucasetab` for the currently-used range: fold
+;     `a`..`z` to `A`..`Z`, leave every other byte unchanged.
+proc(upc)
+    and     eax, 0xff
+    cmp     al, 'a'
+    jb      .done
+    cmp     al, 'z'
+    ja      .done
+    sub     al, 0x20
+.done:
+    stk(1, 1)
+    next()
+endp()
+
+; upper  ( addr len -- )    ASCII uppercase a byte slice in place.
+proc(upper)
+    mov     rcx, rax                    ; len
+    mov     rdi, [rbp]                  ; addr
+.loop:
+    test    rcx, rcx
+    jz      .done
+    mov     al, byte ptr [rdi]
+    cmp     al, 'a'
+    jb      .next
+    cmp     al, 'z'
+    ja      .next
+    sub     al, 0x20
+    mov     byte ptr [rdi], al
+.next:
+    add     rdi, 1
+    sub     rcx, 1
+    jmp     .loop
+.done:
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; lower  ( addr len -- )    ASCII lowercase a byte slice in place.
+proc(lower)
+    mov     rcx, rax                    ; len
+    mov     rdi, [rbp]                  ; addr
+.loop:
+    test    rcx, rcx
+    jz      .done
+    mov     al, byte ptr [rdi]
+    cmp     al, 'A'
+    jb      .next
+    cmp     al, 'Z'
+    ja      .next
+    add     al, 0x20
+    mov     byte ptr [rdi], al
+.next:
+    add     rdi, 1
+    sub     rcx, 1
+    jmp     .loop
+.done:
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; uppercase  ( c-addr -- c-addr )    uppercase a counted string in place.
+proc(uppercase)
+    mov     [rbp - cell], rax
+    stk(1, 2)
+    call    count
+    call    upper
+    next()
+endp()
+
+; lowercase  ( c-addr -- c-addr )    lowercase a counted string in place.
+proc(lowercase)
+    mov     [rbp - cell], rax
+    stk(1, 2)
+    call    count
+    call    lower
+    next()
+endp()
+
+; +place  ( addr len dest -- )    append a string to a counted destination.
+;     Mirrors WF32's counted-string convention: the length byte counts
+;     payload bytes, but the buffer keeps one trailing NUL, so the
+;     append clips at `maxcounted - 1` (= 254) payload bytes.
+proc(plus_place)
+    mov     rcx, [rbp]                  ; incoming len
+    movzx   edx, byte ptr [rax]         ; current counted length
+    mov     edi, 254                    ; maxcounted - 1
+    sub     edi, edx                    ; remaining payload capacity
+    cmp     ecx, edi
+    cmovg   ecx, edi                    ; clip append len to remaining room
+    add     byte ptr [rax], cl          ; update counted length
+    lea     rdi, [rax + rdx + 1]        ; dest payload write pointer
+    mov     rsi, [rbp + cell]           ; source addr
+    mov     byte ptr [rdi + rcx], 0     ; keep trailing NUL
+    rep     movsb
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; place  ( addr len dest -- )    overwrite a counted destination string.
+;     Clears the counted length then reuses +place for the actual copy.
+proc(place)
+    mov     byte ptr [rax], 0
+    jmp     plus_place
+endp()
+
+; c+place  ( char dest -- )    append one character to a counted string.
+proc(c_plus_place)
+    movzx   edx, byte ptr [rax]
+    mov     rcx, [rbp]
+    add     byte ptr [rax], 1
+    mov     word ptr [rax + rdx + 1], cx
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; skip  ( addr len char -- addr' len' )    advance past leading char-matches
+;     Special-cases char == 0x20 to use "≤ space" (skip any blank-ish).
+proc(skip)
+    mov     rcx, [rbp]
+    test    rcx, rcx
+    jz      .L8
+    cmp     rax, 0x20
+    jne     .L2
+
+    mov     rdi, [rbp + cell]
+.L1:
+    cmp     byte ptr [rdi], 0x20
+    ja      .L7
+    add     rdi, 1
+    sub     rcx, 1
+    jnz     .L1
+    jmp     .L7
+
+.L2:
+    mov     rdi, [rbp + cell]
+    repz    scasb
+    je      .L7
+    sub     rdi, 1
+    add     rcx, 1
+.L7:
+    mov     [rbp + cell], rdi
+.L8:
+    mov     rax, rcx
+    stk(3, 2)
+    next()
+endp()
+
+; -skip  ( addr len char -- addr len' )    remove TRAILING char-matches
+proc(minus_skip)
+    mov     rcx, [rbp]
+    test    rcx, rcx
+    jz      .L9
+    mov     rdx, [rbp + cell]
+.L1:
+    cmp     [rdx + rcx - 1], al
+    jne     .L9
+    sub     rcx, 1
+    jnz     .L1
+.L9:
+    mov     rax, rcx
+    stk(3, 2)
+    next()
+endp()
+
+; scan  ( addr len char -- addr' len' )    advance to first occurrence of char
+proc(scan)
+    mov     rcx, [rbp]
+    test    rcx, rcx
+    jz      .L2
+    mov     rdi, [rbp + cell]
+    repnz   scasb               ; scan while NOT equal
+    jne     .L1
+    add     rcx, 1
+    sub     rdi, 1              ; back up to the match
+.L1:
+    mov     [rbp + cell], rdi
+.L2:
+    mov     rax, rcx
+    stk(3, 2)
+    next()
+endp()
+
+; -scan  ( addr len char -- addr' len' )    backward scan.
+;     On hit: returns (addr+match_pos+1, len-match_pos-1) — the
+;             trailing slice AFTER the matched char.
+;     On miss: returns (addr, len) unchanged.
+;
+;     WF32-divergence note: the WF32 source sets `rdi = addr + len`
+;     and scans down from there, which (a) reads one byte PAST the
+;     buffer end on the first iteration and (b) misses the FIRST byte
+;     of the buffer entirely (because rcx runs out before rdi reaches
+;     addr). Both are bugs — the past-end read can spuriously match if
+;     memory there happens to hold the search byte, and a match at
+;     position 0 is silently missed. Fixed by starting at addr+len-1.
+proc(minus_scan)
+    mov     rcx, [rbp]
+    mov     rdx, rcx
+    test    rcx, rcx
+    jz      .L2
+    mov     rdi, [rbp + cell]
+    add     rdi, rcx
+    dec     rdi                  ; start at addr+len-1 (last valid byte)
+    std
+    repnz   scasb
+    cld
+    jne     .L1
+    sub     rdx, rcx
+    sub     rdx, 1
+    add     rdi, 1
+.L1:
+    mov     [rbp + cell], rdi
+.L2:
+    mov     rax, rdx
+    stk(3, 2)
+    next()
+endp()
+
+; search  ( a1 len1 a2 len2 -- a3 len3 flag )    find needle a2 in haystack a1
+;     a3, len3 = match position + remaining length on hit; original
+;     (a1, len1) on miss. flag = -1 hit, 0 miss.
+;
+;     Saves UP (rbx) on the rstack because the inner-loop probe lives
+;     in rbx. Each return path pops it before exiting.
+proc(search)
+    test    rax, rax
+    jz      .L9                 ; len2 == 0 → trivial hit (flag = -1)
+    mov     rcx, [rbp + cell]   ; rcx = len1
+    lea     rdx, [rcx + 1]
+    sub     rdx, rax            ; rdx = len1 - len2 + 1
+    jbe     .L6                 ; needle longer than haystack → miss
+    push    rbx
+    mov     rbx, [rbp + 2*cell] ; rbx = current probe = a1
+.L1:
+    mov     rcx, rax            ; rcx = len2 (cmpsb count)
+    mov     rsi, [rbp]          ; rsi = needle base
+    mov     rdi, rbx            ; rdi = probe
+    repz    cmpsb
+    jz      .L7
+    add     rbx, 1
+    sub     rdx, 1
+    jnz     .L1
+    pop     rbx
+.L6:
+    xor     rax, rax            ; miss: flag = 0
+    add     rbp, cell           ; manual stk adjust (4 in, 3 out)
+    ret
+.L7:
+    mov     rcx, rbx
+    sub     rcx, [rbp + 2*cell] ; rcx = offset from a1 to match
+    sub     [rbp + cell], rcx   ; len1 -= offset → len3
+    mov     [rbp + 2*cell], rbx ; a1 slot ← match position
+    pop     rbx
+.L9:
+    or      rax, -1             ; hit: flag = -1
+    stk(4, 3)
+    next()
+endp()

@@ -1,0 +1,14 @@
+/target/
+*.pdb
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+desktop.ini
+Thumbs.db
+LLVM-C.dll
+*.out
+!tests/data/**/*.out

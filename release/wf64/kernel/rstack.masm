@@ -1,0 +1,264 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — return-stack & sp/rp pointer primitives.
+;
+; Ports WF32 gkernel32.fs:197-273 (the return-stack family). WF32
+; inlines these primitives, so its `>r` is literally `push eax` —
+; there's no separate return address to worry about. WF64 is also STC
+; but does NOT inline: every primitive is a `call` target, so every
+; one of these needs to lift its own caller's return address before
+; touching the user's portion of the return stack, then put the return
+; address back before `ret`. The dance:
+;
+;     pop  rcx          ; save caller's return address
+;     ... mess with rsp ...
+;     push rcx          ; put it back
+;     ret
+;
+; (See the WF64 register-conventions memory note.)
+;
+; Convention used here: r12/r13/r14 are scratch — quit etc. don't rely
+; on them being preserved across these primitives.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; dup>r  ( n -- n  r: -- n )
+;     Copy TOS onto the return stack. Data stack unchanged.
+proc(dup_to_r)
+    pop     rcx                              ; save return addr
+    push    TOS                              ; push n onto rstack
+    push    rcx                              ; restore return addr
+    next()
+endp()
+
+; >r  ( n -- )  ( r: -- n )
+;     Move TOS to return stack.
+proc(to_r)
+    pop     rcx
+    push    TOS
+    push    rcx
+    mov     TOS, [DSP]                       ; raise NOS into TOS
+    stk(1, 0)
+    next()
+endp()
+
+; r>  ( -- n )  ( r: n -- )
+;     Move top of return stack to data stack.
+proc(r_from)
+    pop     rcx                              ; return addr
+    mov     [DSP - cell], TOS                ; spill old TOS
+    pop     TOS                              ; n
+    push    rcx
+    stk(0, 1)
+    next()
+endp()
+
+; r@  ( -- n )  ( r: n -- n )
+;     Copy top of return stack to data stack (peek).
+proc(r_fetch)
+    mov     [DSP - cell], TOS                ; spill old TOS
+    mov     TOS, [rsp + cell]                ; skip past our return addr
+    stk(0, 1)
+    next()
+endp()
+
+; rdrop  ( r: n -- )
+;     Discard top of return stack.
+proc(rdrop)
+    pop     rcx
+    add     rsp, cell                        ; drop n
+    push    rcx
+    next()
+endp()
+
+; 2>r  ( n1 n2 -- )  ( r: -- n1 n2 )
+;     Push the pair (n1 on bottom, n2 on top of rstack). Semantically
+;     `swap >r >r`.
+proc(two_to_r)
+    pop     r8                               ; return addr
+    mov     rcx, [DSP]                       ; rcx = n1
+    push    rcx                              ; n1 onto rstack (deeper)
+    push    TOS                              ; n2 onto rstack (top)
+    push    r8                               ; restore return addr
+    mov     TOS, [DSP + cell]                ; raise NNOS into new TOS
+    add     DSP, 2*cell
+    next()
+endp()
+
+; 2r>  ( -- n1 n2 )  ( r: n1 n2 -- )
+;     Inverse of 2>r. Semantically `r> r> swap`.
+proc(two_r_from)
+    pop     r8                               ; return addr
+    mov     [DSP - cell], TOS                ; spill old TOS (becomes NNOS)
+    pop     TOS                              ; new TOS = n2 (top of rstack)
+    pop     rcx                              ; rcx = n1
+    push    r8                               ; restore return addr
+    mov     [DSP - 2*cell], rcx              ; new NOS = n1
+    stk(0, 2)
+    next()
+endp()
+
+; 2r@  ( -- n1 n2 )  ( r: n1 n2 -- n1 n2 )
+;     Copy the top two of return stack (peek).
+proc(two_r_fetch)
+    mov     [DSP - cell], TOS                ; spill old TOS
+    ; rsp[0] = return addr, rsp[1] = n2 (top), rsp[2] = n1 (deeper).
+    mov     rdx, [rsp + 2*cell]              ; n1
+    mov     TOS, [rsp + cell]                ; n2
+    mov     [DSP - 2*cell], rdx              ; new NOS = n1
+    stk(0, 2)
+    next()
+endp()
+
+; i  ( -- n )
+;     Current loop index from the top loop frame. Callable form must skip
+;     this proc's return address, so the active frame starts at rsp+cell.
+proc(i_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [rsp + cell]
+    add     TOS, [rsp + 2*cell]
+    stk(0, 1)
+    next()
+endp()
+
+; j  ( -- n )
+;     Next outer loop index from the second loop frame on the rstack.
+proc(j_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [rsp + 3*cell]
+    add     TOS, [rsp + 4*cell]
+    stk(0, 1)
+    next()
+endp()
+
+; do-part1  ( limit start -- )
+;     First half of WF32's loop-frame construction. Callable form stores the
+;     two inputs in user scratch so do-part2 can finish the frame setup.
+proc(do_part1)
+    mov     rcx, [DSP]                       ; limit
+    mov     [UP + user_DO_TMP0], rcx
+    mov     [UP + user_DO_TMP1], TOS         ; start
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    next()
+endp()
+
+; do-part2  ( -- )
+;     Finish WF32-style loop-frame construction from do-part1's saved values.
+proc(do_part2)
+    pop     r9                               ; return addr
+    mov     rcx, [UP + user_DO_TMP0]         ; limit
+    mov     rdx, [UP + user_DO_TMP1]         ; start
+    mov     r8, 1
+    shl     r8, 63
+    add     rcx, r8                          ; bias limit
+    sub     rdx, rcx                         ; adjusted index
+    push    rcx                              ; deeper frame cell
+    push    rdx                              ; top frame cell
+    push    r9                               ; restore return addr
+    next()
+endp()
+
+; 2rdrop  ( r: n1 n2 -- )
+;     Discard top two of return stack.
+proc(two_rdrop)
+    pop     rcx
+    add     rsp, 2*cell
+    push    rcx
+    next()
+endp()
+
+; n>r  ( x[u-1] ... x1 x0 u -- )  ( r: -- x[u-1] ... x1 x0 u )
+;     Move u data-stack cells to the return stack and save u on top of
+;     them there.
+proc(n_to_r)
+    pop     r8                               ; save return addr
+    mov     rcx, TOS                         ; rcx = u
+    mov     r9, rcx                          ; keep u after rep
+    mov     rsi, DSP                         ; source = top item under u
+    mov     r10, r9
+    shl     r10, 3
+    add     r10, cell
+    sub     rsp, r10                         ; reserve (u + 1) rstack cells
+    add     DSP, r10                         ; drop moved cells + u
+    mov     [rsp], r9                        ; save u on top of rstack
+    lea     rdi, [rsp + cell]                ; destination = below saved u
+    rep     movsq
+    push    r8                               ; restore return addr
+    mov     TOS, [DSP - cell]                ; raise the new TOS
+    next()
+endp()
+
+; nr>  ( r: x[u-1] ... x1 x0 u -- )  ( -- x[u-1] ... x1 x0 u )
+;     Inverse of n>r. Restores the counted block and returns u on top.
+proc(nr_from)
+    pop     r8                               ; save return addr
+    mov     [DSP - cell], TOS                ; preserve prior TOS below restore
+    mov     TOS, [rsp]                       ; TOS = u
+    add     rsp, cell                        ; drop saved u from rstack
+    mov     rcx, TOS                         ; rcx = u
+    mov     r10, rcx
+    shl     r10, 3
+    add     r10, cell
+    sub     DSP, r10                         ; reserve u cells under new TOS
+    mov     rsi, rsp                         ; source = saved cells on rstack
+    mov     rdi, DSP                         ; destination = new NOS slot
+    mov     r10, rcx
+    shl     r10, 3
+    add     rsp, r10                         ; drop moved cells from rstack
+    rep     movsq
+    push    r8                               ; restore return addr
+    next()
+endp()
+
+; sp@  ( -- addr )
+;     Push the current data-stack pointer. After the spill+sub the new
+;     TOS is the post-spill DSP — i.e., the address of the (new) NOS
+;     slot, matching WF32's semantics.
+proc(sp_fetch)
+    sub     DSP, cell
+    mov     [DSP], TOS                       ; spill old TOS
+    mov     TOS, DSP                         ; new TOS = current DSP
+    next()
+endp()
+
+; sp!  ( addr -- )
+;     Set the data-stack pointer from TOS. New TOS is loaded from the
+;     new [DSP].
+proc(sp_store)
+    mov     DSP, TOS
+    mov     TOS, [DSP]
+    ; Depth is entirely up to the caller — no stk macro.
+    next()
+endp()
+
+; rp@  ( -- addr )
+;     Push the current return-stack pointer (skipping past our own
+;     return addr, so the value reflects the rstack the user code
+;     would observe).
+proc(rp_fetch)
+    mov     [DSP - cell], TOS                ; spill old TOS
+    lea     TOS, [rsp + cell]                ; skip past our return addr
+    stk(0, 1)
+    next()
+endp()
+
+; rp!  ( addr -- )
+;     Set the return-stack pointer from TOS. Implemented as save
+;     return addr → set rsp → push return addr, so the apparent rsp
+;     (what the user sees, modulo our own return addr) is `addr`.
+proc(rp_store)
+    pop     rcx                              ; save return addr
+    mov     rsp, TOS                         ; install new rsp
+    push    rcx                              ; return addr lives at new rsp - cell
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()

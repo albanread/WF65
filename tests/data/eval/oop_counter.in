@@ -1,0 +1,6 @@
+class counter cell ivar: n :m init 0 n ! ;m :m bump 1 n +! ;m :m val n @ ;m end-class
+counter new c
+c -> init
+c -> bump c -> bump
+c -> val .
+bye

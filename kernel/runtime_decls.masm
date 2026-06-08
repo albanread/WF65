@@ -1,0 +1,99 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — Rust runtime function declarations.
+;
+; The host (src/main.rs) registers each of these via
+; Jit::define_extern_fn, and bind_externs's host_resolver maps names
+; → function pointers in src/runtime.rs.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+@extern rt_print_int(2)         ; (n, base) — print signed cell in base + space
+@extern rt_dot_s(4)             ; print the live stack from tos/dsp/sp0/rsp
+@extern rt_emit(1)              ; write one byte to current output
+@extern rt_type(2)              ; write u bytes from addr to current output
+@extern rt_bye(1)               ; legacy; bye is now cooperative (kept for binding)
+@extern rt_read_line(2)         ; read one line into buf (cap); returns bytes read
+@extern rt_read_key(0)          ; read one character from current input source
+@extern rt_key_q(0)             ; true if a character is available for KEY
+@extern rt_to_float(3)          ; parse addr+len as decimal float, store bits, return flag
+@extern rt_forth_brk(5)         ; Forth-tuned breakpoint dump: tos, dsp, sp0, rsp, up
+@extern rt_forth_trace(4)       ; per-word trace: nt, tos, dsp, sp0
+@extern rt_slurp_file(2)        ; read file at (addr,len) into Rust Vec, return content ptr or 0
+@extern rt_slurp_len(0)         ; return byte length of top slurped file
+@extern rt_slurp_pop(0)         ; pop and free the top slurped file
+@extern rt_let_compile(1)       ; compile a LET form (arg = UP)
+@extern rt_code_compile_body(1) ; compile a CODE: body, returns fn_addr (arg = UP)
+@extern rt_vec_alloc_floats(3)  ; (UP, n_cells, slot_addr) -> err — alloc + store
+@extern rt_vec_alloc_refs(3)    ; (UP, n_cells, slot_addr) -> err — alloc + store
+@extern rt_gc_collect(1)        ; (UP) -> err — major collection
+@extern rt_gc_collect_minor(1)  ; (UP) -> err — minor collection
+@extern rt_gc_collect_full(1)   ; (UP) -> err — Tenured-compacting collection
+@extern rt_gc_auto_step(1)      ; (UP) -> 0 — gated auto-cycle (#7 in forth_gc_needs.md)
+@extern rt_gc_should_collect(0) ; () -> 1 if heap wants a collection, else 0
+@extern rt_gc_cycle_count(0)    ; () -> monotonically-increasing collection counter
+@extern rt_string_from_bytes(3) ; (UP, src_addr, len) -> tagged String ptr (or u64::MAX)
+@extern rt_string_bytes_equal(2); (tagged_a, tagged_b) -> -1 if bytes match, 0 if not
+@extern rt_s_literal_compile_at_here(3) ; (UP, src_addr, len) -> 0 or u64::MAX
+@extern rt_sb_new(2)            ; (UP, capacity) -> tagged builder (or u64::MAX)
+@extern rt_sb_append_bytes(3)   ; (builder_tagged, src_addr, len) -> 0 or u64::MAX
+@extern rt_sb_append_codepoint(2); (builder_tagged, codepoint) -> 0 or u64::MAX
+@extern rt_sb_append_int(2)     ; (builder_tagged, n) -> 0 or u64::MAX
+@extern rt_sb_to_string(2)      ; (UP, builder_tagged) -> tagged String (or u64::MAX)
+@extern rt_string_concat(3)     ; (UP, tagged_a, tagged_b) -> tagged String (or u64::MAX)
+@extern rt_string_slice(4)      ; (UP, tagged, start, end) -> tagged String (or u64::MAX)
+@extern rt_string_find(2)       ; (needle, haystack) -> byte idx (or u64::MAX = -1)
+@extern rt_string_starts(2)     ; (prefix, s) -> -1 if match, else 0
+@extern rt_string_ends(2)       ; (suffix, s) -> -1 if match, else 0
+@extern rt_string_cmp(2)        ; (a, b) -> -1 / 0 / +1
+@extern rt_string_hash(1)       ; (tagged) -> u64 hash
+@extern rt_string_ci_eq(2)      ; (a, b) -> -1 if ASCII-ci-equal, else 0
+@extern rt_string_trim(2)       ; (UP, tagged) -> tagged String
+@extern rt_string_ltrim(2)      ; (UP, tagged) -> tagged String
+@extern rt_string_rtrim(2)      ; (UP, tagged) -> tagged String
+@extern rt_int_to_string(2)     ; (UP, n) -> tagged String
+@extern rt_string_to_int(2)     ; (tagged, out_value_addr) -> -1 if parsed, 0 if not
+@extern rt_string_contains(2)   ; (needle, haystack) -> -1 if found, 0 if not
+@extern rt_string_rfind(2)      ; (needle, haystack) -> last byte idx (or -1)
+@extern rt_string_repeat(3)     ; (UP, tagged, n) -> tagged String (or -1)
+@extern rt_string_replace(4)    ; (UP, needle, repl, haystack) -> tagged String (or -1)
+@extern rt_string_split_into(5) ; (UP, sep, haystack, out_addr, max_parts) -> n parts (or -1)
+@extern rt_string_clen(1)       ; (tagged) -> codepoint count (or -1 if malformed UTF-8)
+@extern rt_string_cat(2)        ; (tagged, char_idx) -> codepoint (or -1)
+@extern rt_string_valid(1)      ; (tagged) -> -1 if valid UTF-8, else 0
+@extern rt_char_to_string(2)    ; (UP, codepoint) -> tagged String (or -1)
+@extern rt_string_upper(2)      ; (UP, tagged) -> tagged String (or -1)
+@extern rt_string_lower(2)      ; (UP, tagged) -> tagged String (or -1)
+@extern rt_string_to_float(2)   ; (tagged, out_bits_addr) -> -1 if parsed, 0 if not
+@extern rt_float_to_string(2)   ; (UP, f64_bits) -> tagged String (or -1)
+@extern rt_sb_append_float(2)   ; (builder_tagged, f64_bits) -> 0 or -1
+@extern rt_string_words_into(4) ; (UP, haystack, out_addr, max_parts) -> n tokens (or -1)
+@extern rt_igui_page(0)         ; () — clear the wf64-ui console scrollback (no-op headless)
+@extern rt_igui_at_xy(2)        ; (col, row) — record cursor pos for the next emit
+@extern rt_bug_rust_panic(0)    ; () — deliberately Rust-panic (Phase 3a test)
+@extern rt_bug_seh_av(0)        ; () — deliberately NULL-deref (Phase 3b SEH test)
+
+; ── Graphical pane API: each fn wraps the iGui batch system.
+;    Coords are signed-integer pixels, colours are 24-bit RGB
+;    packed as 0xRRGGBB into a single Forth cell.
+@extern rt_gpane_open(4)        ; (width, height, title_addr, title_len) -> child_id (0 on fail)
+@extern rt_gpane_begin(1)       ; (child_id) -> 0
+@extern rt_gpane_present(0)     ; () -> 0
+@extern rt_gpane_clear(1)       ; (rgb) -> 0
+@extern rt_gpane_fill_rect(5)   ; (x, y, w, h, rgb) -> 0
+@extern rt_gpane_stroke_rect(6) ; (x, y, w, h, thick, rgb) -> 0
+@extern rt_gpane_line(6)        ; (x0, y0, x1, y1, thick, rgb) -> 0
+@extern rt_gpane_fill_circle(4) ; (cx, cy, r, rgb) -> 0
+@extern rt_canvas_blit(4)       ; (child_id, src_addr, w, h) -> 0 — bulk BGRA framebuffer upload (canvas)
+
+; Event polling: matches `child_id` (or globals), writes the
+; decoded event into 5 cells of scratch storage passed as
+; pointers.  Returns 1 if an event was returned, 0 on timeout.
+@extern rt_gpane_next_event_for(7) ; (id, timeout_ms, &kind, &p1, &p2, &p3, &p4) -> 0|1

@@ -1,0 +1,285 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — stack manipulation primitives.
+;
+; Direct register-rename ports of WF32 gkernel32.fs:124-195 (eax→rax,
+; ebp→rbp, cell 4→8). Order and stack-effect contracts match WF32.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; dup  ( n -- n n )
+;     Duplicate TOS.
+proc(dup_)
+    mov     [DSP - cell], TOS
+    stk(1, 2)
+    next()
+endp()
+
+; swap  ( n1 n2 -- n2 n1 )
+proc(swap_)
+    mov     rcx, [DSP]
+    mov     [DSP], TOS
+    mov     TOS, rcx
+    next()
+endp()
+
+; drop  ( n -- )
+proc(drop_)
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; rot  ( n1 n2 n3 -- n2 n3 n1 )
+;     Rotate the third-from-top element up to TOS.
+proc(rot_)
+    mov     rcx, [DSP]               ; rcx = n2
+    mov     rdx, [DSP + cell]        ; rdx = n1
+    mov     [DSP], TOS               ; n3 → n2's slot
+    mov     [DSP + cell], rcx        ; n2 → n1's slot
+    mov     TOS, rdx                 ; TOS = n1
+    next()
+endp()
+
+; over  ( n1 n2 -- n1 n2 n1 )
+proc(over_)
+    mov     [DSP - cell], TOS
+    mov     TOS, [DSP]
+    stk(2, 3)
+    next()
+endp()
+
+; -rot  ( n1 n2 n3 -- n3 n1 n2 )
+;     Rotate the TOS down to third-from-top.
+proc(neg_rot)
+    mov     rcx, [DSP + cell]        ; rcx = n1
+    mov     rdx, [DSP]               ; rdx = n2
+    mov     [DSP + cell], TOS        ; n3 → n1's slot
+    mov     [DSP], rcx               ; n1 → n2's slot
+    mov     TOS, rdx                 ; TOS = n2
+    next()
+endp()
+
+; ?dup  ( n -- n [n] )
+;     Duplicate TOS only if it's non-zero. Variable stack effect.
+proc(qdup)
+    test    TOS, TOS
+    jz      .nodup
+    mov     [DSP - cell], TOS
+    sub     DSP, cell
+.nodup:
+    next()
+endp()
+
+; nip  ( n1 n2 -- n2 )
+;     Discard NOS; TOS unchanged.
+proc(nip_)
+    stk(2, 1)
+    next()
+endp()
+
+; tuck  ( n1 n2 -- n2 n1 n2 )
+;     Copy TOS under NOS.
+proc(tuck_)
+    mov     rcx, [DSP]               ; rcx = n1 (save old NOS)
+    mov     [DSP], TOS               ; old NOS slot ← n2
+    mov     [DSP - cell], rcx        ; new NOS slot ← n1
+    stk(2, 3)
+    next()
+endp()
+
+; pick  ( xu ... x1 x0 u -- xu ... x1 x0 xu )
+;     Index-based copy. `0 pick` ≡ dup, `1 pick` ≡ over, etc.
+;     WF32 version: one instruction, no stk needed (1 in, 1 out).
+proc(pick)
+    mov     TOS, [DSP + TOS*cell]
+    next()
+endp()
+
+; roll  ( xu xu-1 ... x1 x0 u -- xu-1 ... x1 x0 xu )
+;     Remove the item at depth u (0-based from TOS) and put it at TOS,
+;     shifting items 0..u-1 one slot deeper. Net: -1 (consumes u).
+proc(roll_)
+    mov     rcx, TOS                         ; u (loop counter)
+    mov     rdx, [DSP + rcx*cell]            ; xu — item to bring to top
+    test    rcx, rcx
+    jz      .done                            ; 0 roll: pop count, promote NOS
+    lea     r8, [DSP + rcx*cell - cell]      ; start at slot u-1
+.shift:
+    mov     r9, [r8]                         ; item at this slot
+    mov     [r8 + cell], r9                  ; shift it one slot deeper
+    sub     r8, cell
+    dec     rcx
+    jnz     .shift
+.done:
+    add     DSP, cell                        ; net: one slot freed
+    mov     TOS, rdx                         ; new TOS = xu
+    next()
+endp()
+
+; depth  ( -- n )
+;     Push the current data-stack depth (in cells).
+;     depth = (sp0 - DSP)/cell + 1  ; +1 because TOS is cached in rax.
+proc(depth)
+    mov     [DSP - cell], TOS        ; spill old TOS into new NOS slot
+    mov     TOS, [UP + user_SP0]
+    sub     TOS, DSP
+    sar     TOS, 3                   ; >> log2(cell)
+    add     TOS, 1
+    stk(0, 1)
+    next()
+endp()
+
+; ─── Double / multi-cell stack ops (ported via port-wf32) ─────────────
+; All from WF32 gkernel32.fs:705-781. 2swap and 2rot use the WF32
+; `xchg rbp, rsp` trick — swap data stack and rstack pointers, use
+; push/pop for fast stack-relative access, swap back. On WF64 this
+; still works because interrupts don't fire in user mode mid-instruction
+; pair; rbx/rsi pushes preserve UP and a scratch across the dance.
+
+; 2drop  ( x1 x2 -- )
+proc(two_drop)
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; 2dup  ( x1 x2 -- x1 x2 x1 x2 )
+proc(two_dup)
+    mov     rcx, [rbp]
+    mov     [rbp - cell], rax
+    mov     [rbp - 2*cell], rcx
+    stk(2, 4)
+    next()
+endp()
+
+; 2nip  ( x1 x2 x3 x4 -- x3 x4 )
+proc(two_nip)
+    mov     rcx, [rbp]
+    mov     [rbp + 2*cell], rcx
+    stk(4, 2)
+    next()
+endp()
+
+; 2swap  ( x1 x2 x3 x4 -- x3 x4 x1 x2 )
+;     Uses the xchg-with-rsp trick. UP (rbx) is unaffected — only rsp
+;     is swapped, not rbx.
+proc(two_swap)
+    xchg    rbp, rsp
+    pop     rcx
+    pop     rdx
+    pop     rdi
+    push    rcx
+    push    rax
+    push    rdi
+    xchg    rbp, rsp
+    mov     rax, rdx
+    stk(4, 4)
+    next()
+endp()
+
+; 2rot  ( x1 x2 x3 x4 x5 x6 -- x3 x4 x5 x6 x1 x2 )
+;     Saves UP (rbx) and rsi onto the return stack across the xchg
+;     dance so we can use them as scratch while rsp points into the
+;     data stack region.
+proc(two_rot)
+    push    rbx
+    push    rsi
+    xchg    rbp, rsp
+    pop     rbx
+    pop     rcx
+    pop     rdx
+    pop     rdi
+    pop     rsi
+    push    rdx
+    push    rcx
+    push    rbx
+    push    rax
+    push    rsi
+    xchg    rbp, rsp
+    mov     rax, rdi
+    pop     rsi
+    pop     rbx
+    stk(6, 6)
+    next()
+endp()
+
+; 2over  ( x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2 )
+proc(two_over)
+    mov     [rbp - cell], rax
+    mov     rcx, [rbp + 2*cell]
+    mov     rax, [rbp + cell]
+    mov     [rbp - 2*cell], rcx
+    stk(4, 6)
+    next()
+endp()
+
+; 3drop  ( x1 x2 x3 -- )
+proc(three_drop)
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; 4drop  ( x1 x2 x3 x4 -- )
+proc(four_drop)
+    mov     rax, [rbp + 3*cell]
+    stk(4, 0)
+    next()
+endp()
+
+; 3dup  ( x1 x2 x3 -- x1 x2 x3 x1 x2 x3 )
+proc(three_dup)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    mov     [rbp - cell], rax
+    mov     [rbp - 2*cell], rcx
+    mov     [rbp - 3*cell], rdx
+    stk(3, 6)
+    next()
+endp()
+
+; 4dup  ( x1 x2 x3 x4 -- x1 x2 x3 x4 x1 x2 x3 x4 )
+proc(four_dup)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    mov     rdi, [rbp + 2*cell]
+    mov     [rbp - cell], rax
+    mov     [rbp - 2*cell], rdi
+    mov     [rbp - 3*cell], rcx
+    mov     [rbp - 4*cell], rdx
+    stk(4, 8)
+    next()
+endp()
+
+; s-reverse  ( x[k-1] ... x1 x0 k -- x0 x1 ... x[k-1] )
+;     Reverse the top k stack items in place, then drop k.
+proc(s_reverse)
+    lea     rcx, [rbp - cell]              ; one slot above the top item
+    lea     rax, [rcx + cell + rax*cell]   ; one slot below the bottom item
+
+.loop:
+    sub     rax, cell
+    add     rcx, cell
+    cmp     rcx, rax
+    jae     .done
+
+    mov     rdx, [rax]
+    xor     [rcx], rdx
+    xor     rdx, [rcx]
+    xor     [rcx], rdx
+    mov     [rax], rdx
+    jmp     .loop
+
+.done:
+    mov     rax, [rbp]                     ; drop k, raise old top item
+    add     rbp, cell
+    next()
+endp()

@@ -1,0 +1,10 @@
+# requires: 2rdrop rdrop >r
+# Colon definitions ending in rstack-juggling primitives must NOT be
+# tail-call-optimised. >r is emitted inline (no CALL), so it is safe.
+# 2rdrop / rdrop / n>r / nr> are emitted as CALLs and the TCO opcode
+# patch would feed the callee a stale rstack and crash.
+: ends-in-2rdrop  ( -- )  1 2 >r >r 2rdrop ;
+: ends-in-rdrop   ( -- )  3   >r    rdrop ;
+ends-in-2rdrop  77 .
+ends-in-rdrop   88 .
+bye

@@ -1,0 +1,3 @@
+[NF] spawning E:\factor\factor.com
+[NF] spawned PID=18132
+[NF] probing for listener readiness

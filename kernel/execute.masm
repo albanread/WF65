@@ -1,0 +1,195 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — execute.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; execute  ( i*x xt -- j*x )
+;     Pop xt and call the word at xt. Whatever stack effect that word
+;     has applies. STC tail-jump: we replace our return address with
+;     a jump to xt, so its `ret` returns to OUR caller — one CALL/RET
+;     pair saved compared to `call rcx`.
+;
+;     Stack effect is variadic (the called word may push/pop anything).
+;     We manually adjust rbp for the xt drop.
+;
+;     Internal-state contract at entry:
+;       DSP < SP0  -> there is a real NOS below xt; raise [DSP]
+;       DSP = SP0  -> xt is the only real item; dropping xt makes depth 0
+;       DSP > SP0  -> caller already normalized to internal depth 0
+;
+;     The `jae` (≥) check is what distinguishes the first two cases
+;     correctly. With the old `ja` test, the depth-1 case fell through,
+;     read garbage from [SP0], and turned "xt only" into a fake NOS.
+proc(execute)
+    mov     rcx, TOS                         ; rcx = xt
+    cmp     DSP, [UP + user_SP0]
+    jae     .empty_below                     ; DSP == SP0: xt was the only item
+    mov     TOS, [DSP]                       ; raise NOS to TOS
+    add     DSP, cell                        ; drop the xt slot
+    jmp     rcx                              ; tail-jump
+ .empty_below:
+    cmp     DSP, [UP + user_SP0]
+    ja      .already_empty
+    add     DSP, cell                        ; consume the final real stack item
+.already_empty:
+    xor     TOS, TOS                         ; leave stack logically empty
+    jmp     rcx
+    ; (no next() — we don't ret here, the target's ret returns past us)
+endp()
+
+; perform  ( i*x a-xt -- j*x )
+;     Fetch xt from a-xt, then execute it with the same tail-jump
+;     behavior and internal-state contract as `execute`.
+proc(perform)
+    mov     rcx, [TOS]                       ; rcx = *a-xt = xt
+    cmp     DSP, [UP + user_SP0]
+    jae     .empty_below                     ; DSP == SP0: a-xt was the only item
+    mov     TOS, [DSP]                       ; raise NOS to TOS
+    add     DSP, cell                        ; drop the a-xt slot
+    jmp     rcx                              ; tail-jump
+ .empty_below:
+    cmp     DSP, [UP + user_SP0]
+    ja      .already_empty
+    add     DSP, cell                        ; consume the final real stack item
+.already_empty:
+    xor     TOS, TOS                         ; leave stack logically empty
+    jmp     rcx
+endp()
+
+; Named THROW code constants mirrored from WF32.
+proc(throw_abort_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -1
+    stk(0, 1)
+    next()
+endp()
+
+proc(throw_abortq_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -2
+    stk(0, 1)
+    next()
+endp()
+
+proc(throw_componly_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -14
+    stk(0, 1)
+    next()
+endp()
+
+proc(throw_namereqd_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -16
+    stk(0, 1)
+    next()
+endp()
+
+proc(throw_mismatch_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -22
+    stk(0, 1)
+    next()
+endp()
+
+; -29 = compiler nesting (ANS Forth section 9.3.5).  Used when a
+; defining word like `:` runs while STATE is already 1 — typical
+; cause is a forgotten `;` or `]` in a definition.  Surfacing this
+; cleanly is far better than letting compilation continue in an
+; undefined state (which previously presented as multi-token `?`
+; floods downstream of the broken def — see the gfx-click
+; locals-bug investigation).
+proc(throw_compnest_const)
+    mov     [DSP - cell], TOS
+    mov     TOS, -29
+    stk(0, 1)
+    next()
+endp()
+
+; catch  ( i*x xt -- j*x 0 | i*x n )
+;     Execute xt with a throw handler frame installed on the native
+;     return stack. Normal return appends 0; THROW unwinds directly to
+;     catch's caller with the throw code on TOS and DSP restored.
+proc(catch_word)
+    mov     rcx, TOS                         ; rcx = xt
+    push    DSP                              ; save data-stack pointer
+    mov     rdx, [UP + user_HANDLER]
+    push    rdx                              ; link old handler
+    mov     [UP + user_HANDLER], rsp
+
+    ; Drop xt before execution.
+    mov     TOS, [DSP]
+    add     DSP, cell
+
+    call    rcx
+
+    ; Normal return: append a zero throw code and discard the handler frame.
+    mov     [DSP - cell], TOS
+    mov     rdx, [rsp]
+    mov     [UP + user_HANDLER], rdx
+    add     rsp, 2*cell
+    sub     DSP, cell
+    xor     TOS, TOS
+    next()
+endp()
+
+; throw  ( n -- )
+;     Zero is a no-op. Non-zero unwinds to the current handler frame,
+;     restoring DSP and returning directly to the caller outside that
+;     catch frame.
+proc(throw_word)
+    test    TOS, TOS
+    jz      .zero
+
+    mov     rsp, [UP + user_HANDLER]
+    mov     rdx, [rsp]
+    mov     [UP + user_HANDLER], rdx
+    mov     DSP, [rsp + cell]
+    add     rsp, 2*cell
+    next()
+
+.zero:
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; abort  ( -- )
+;     Minimal ANS/WF32 abort: THROW -1.
+proc(abort_word)
+    mov     TOS, -1
+    call    throw_word
+    next()
+endp()
+
+; ?throw  ( f n -- )
+;     If f is non-zero, THROW n. Otherwise drop both inputs.
+proc(qthrow_word)
+    cmp     qword ptr [DSP], 0
+    jne     .do_throw
+
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+
+.do_throw:
+    add     DSP, cell
+    call    throw_word
+    next()
+endp()
+
+; (comp-only)  ( -- )
+;     Minimal WF32 compile-only helper: THROW -14.
+proc(comp_only_word)
+    mov     TOS, -14
+    call    throw_word
+    next()
+endp()

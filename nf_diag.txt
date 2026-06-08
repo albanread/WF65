@@ -1,0 +1,8 @@
+[NF] FactorSession::new — creating pipes
+[NF] pipes created — redirecting CRT fds
+[NF] fd redirect done — loading factor.dll + patching IAT
+[NF] factor.dll base = 0x7FF9A7860000
+[NF] IAT patch: factor.dll!GetModuleHandleW slot @ 0x7FF9A78E20F8 → hook @ 0x7FF613248ED0
+[NF] IAT patched OK
+[NF] factor.dll loaded and thread started
+[NF] sleeping 4000ms for Factor image load

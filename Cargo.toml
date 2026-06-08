@@ -1,0 +1,109 @@
+[package]
+name = "wf64"
+version = "0.1.0"
+edition = "2021"
+description = "A 64-bit STC Forth, JIT-compiled via the JASM assembler"
+build = "build.rs"
+
+[features]
+default = []
+# Builds wf64-ui as a Windows GUI subsystem app (no console window
+# pops up when launched from Explorer).  Release packaging always
+# enables this; dev builds leave it off so eprintln traces remain
+# visible in the cargo-run terminal.
+gui_subsystem = []
+
+[dependencies]
+# Path dep on JASM while both projects co-evolve. Flip to a git or
+# crates.io dep once JASM stabilises.
+wfasm = { path = "../JASM/rust" }
+newgc-core = { path = "../NewGC/crates/newgc-core" }
+anyhow = "1"
+# libloading — runtime DLL loading for factor.dll (NewFactor IDE).
+libloading = "0.8"
+
+[build-dependencies]
+# Embeds the Win32 application manifest (DPI awareness, common
+# controls v6, UTF-8 active code page) into wf64-ui.exe.
+embed-resource = "3"
+
+# iGui — Windows MDI front-end, ported from NewCormanLisp's iGui
+# (which in turn borrows the renderer architecture from NewCP).
+# Direct2D + DirectWrite + Direct3D 11 + the Win32 message pump.
+# Linux/macOS get stub builds via cfg(windows) inside the module.
+[target.'cfg(windows)'.dependencies]
+windows-numerics = "0.3"
+# docpane — the Markdown + Mermaid render core (forked from DocCrate),
+# WF64's own copy under crates/.  Brings selkie (Mermaid parser) +
+# pulldown-cmark.  Powers the in-window doc_pane / help_pane MDI
+# children.  Kept as a local path dep so WF64 stays independent of
+# NewFactor's tree.
+docpane = { path = "crates/docpane" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    # VEH + EXCEPTION_POINTERS / EXCEPTION_RECORD for crash_handler (Phase 3b).
+    # AddVectoredExceptionHandler is gated on Win32_System_Kernel.
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+]
+
+[lib]
+name = "wf64"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wf64"
+path = "src/main.rs"
+
+[[bin]]
+name = "wf64-ui"
+path = "src/bin/wf64_ui.rs"
+
+[[bin]]
+name = "port-wf32"
+path = "src/bin/port_wf32.rs"
+
+[[bin]]
+name = "newfactor-ui"
+path = "src/bin/newfactor_ui.rs"
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+
+# `release-ship` is the profile used by the packaging script
+# (tools/build-release.ps1).  Builds the smallest, fastest binary
+# we can ship: full LTO, single codegen unit, stripped symbols,
+# abort-on-panic.  Slower to build than plain release; we only
+# use it when assembling release/wf64/.
+[profile.release-ship]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

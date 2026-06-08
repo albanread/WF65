@@ -1,0 +1,287 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — locals-stack scaffolding.
+;
+; R15 is dedicated as LP (locals stack pointer).  forth_main initialises
+; it from [UP + user_LP0] (one past the high end of the 1 MB locals
+; region the Rust host VirtualAlloc'd).  LP grows downward; allocating
+; N cells of locals is `sub r15, N*cell`; freeing is `add r15, N*cell`.
+;
+; This file currently only exposes accessors and a self-contained smoke
+; word.  The real `(LOCAL)` / `LOCAL@` / `LOCAL!` / `{:` / `:}` machinery
+; will land on top of this once the runtime contract is settled.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; lp@   ( -- a-addr )   Current locals stack pointer (R15).
+proc(lp_fetch_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, r15
+    stk(0, 1)
+    next()
+endp()
+
+; lp0@  ( -- a-addr )   Initial locals stack pointer (top of LP region).
+proc(lp0_fetch_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_LP0]
+    stk(0, 1)
+    next()
+endp()
+
+; lp-limit  ( -- a-addr )   Low limit of LP region (overflow check).
+proc(lp_limit_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_LP_LIMIT]
+    stk(0, 1)
+    next()
+endp()
+
+; lp-smoke  ( -- 42 )   Allocate one local cell on LP, store 42, read
+;                       back, free.  Round-trip; lp@ must equal lp0@
+;                       after this returns.
+proc(lp_smoke_word)
+    sub     r15, cell                       ; allocate 1 local
+    mov     qword ptr [r15], 42             ; store
+    mov     [DSP - cell], TOS
+    mov     TOS, [r15]                       ; read back
+    add     r15, cell                        ; free
+    stk(0, 1)
+    next()
+endp()
+
+; ── Locals-frame runtime primitives ──────────────────────────────────
+; These are the four operations a colon definition with locals needs:
+; allocate the frame on entry, store args into local slots, fetch local
+; values at use sites, and free the frame on exit. The kernel's `;`
+; auto-emits the free call based on user_LOCALS_COUNT, so user code
+; only needs the alloc + fetch + store ops.
+
+; (open-locals)  ( n -- )    Allocate n cells on the locals stack.
+proc(open_locals_word)
+    mov     rcx, TOS
+    shl     rcx, 3                              ; n * cell
+    sub     r15, rcx
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; (close-locals)  ( n -- )    Release n cells from the locals stack.
+proc(close_locals_word)
+    mov     rcx, TOS
+    shl     rcx, 3
+    add     r15, rcx
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; (local@)  ( offset -- val )    Fetch [r15 + offset]; offset in bytes.
+proc(local_fetch_word)
+    mov     rcx, TOS
+    mov     TOS, [r15 + rcx]
+    next()
+endp()
+
+; (local!)  ( val offset -- )    Store val at [r15 + offset]; offset in bytes.
+proc(local_store_word)
+    mov     rcx, TOS                            ; offset
+    mov     rdx, [DSP]                           ; val
+    mov     [r15 + rcx], rdx
+    mov     TOS, [DSP + cell]                    ; raise NNOS to TOS
+    stk(2, 0)
+    next()
+endp()
+
+; locals#  ( -- u )    Number of locals declared in the current colon def.
+proc(locals_count_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_LOCALS_COUNT]
+    stk(0, 1)
+    next()
+endp()
+
+; locals#!  ( u -- )    Set the locals count (used by `{:`).
+proc(locals_count_store_word)
+    mov     [UP + user_LOCALS_COUNT], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; check-local-emit  ( c-addr u -- true | c-addr u false )
+;     Scans the user_LOCALS_TABLE for a name matching (c-addr,u).
+;     On match: emits a 15-byte inline fetch sequence at HERE and
+;     returns true (consuming c-addr u).
+;       48 89 45 F8        mov [rbp-8], rax    ; spill TOS to NOS
+;       49 8B 87 <disp32>  mov rax, [r15+d32]  ; load local
+;       48 83 ED 08        sub rbp, 8          ; pop into TOS
+;     On no match: returns false leaving c-addr u intact.
+;     Used by interpret_source between parse_name and find_name when
+;     state==compile and user_LOCALS_COUNT > 0.
+;
+;     R13 is preserved (interp_source's tie-breaker lives there across
+;     primitive calls).
+proc(check_local_emit_word)
+    mov     rcx, TOS                            ; u = name length
+    mov     rsi, [DSP]                           ; c-addr
+
+    mov     r10, [UP + user_LOCALS_COUNT]
+    test    r10, r10
+    jz      .not_found
+
+    lea     r11, [UP + user_LOCALS_TABLE]
+    xor     r9, r9                                ; slot index
+.slot_loop:
+    mov     rax, r9
+    shl     rax, 5                                ; *32
+    add     rax, r11                              ; slot ptr
+
+    movzx   rdx, byte ptr [rax]                  ; slot's name length
+    cmp     rdx, rcx
+    jne     .next_slot
+
+    ; Lengths match -- compare bytes.
+    xor     r8, r8
+.cmp_loop:
+    cmp     r8, rcx
+    je      .matched
+    mov     dl, byte ptr [rsi + r8]
+    cmp     dl, byte ptr [rax + 1 + r8]
+    jne     .next_slot
+    inc     r8
+    jmp     .cmp_loop
+
+.matched:
+    ; Read the byte-offset and emit the inline fetch at HERE.
+    mov     rdx, [rax + 16]
+    mov     rdi, [UP + user_HERE]
+
+    mov     byte ptr [rdi + 0], 0x48
+    mov     byte ptr [rdi + 1], 0x89
+    mov     byte ptr [rdi + 2], 0x45
+    mov     byte ptr [rdi + 3], 0xF8
+    mov     byte ptr [rdi + 4], 0x49
+    mov     byte ptr [rdi + 5], 0x8B
+    mov     byte ptr [rdi + 6], 0x87
+    mov     dword ptr [rdi + 7], edx
+    mov     byte ptr [rdi + 11], 0x48
+    mov     byte ptr [rdi + 12], 0x83
+    mov     byte ptr [rdi + 13], 0xED
+    mov     byte ptr [rdi + 14], 0x08
+    add     rdi, 15
+    mov     [UP + user_HERE], rdi
+
+    ; ( c-addr u -- -1 )
+    mov     TOS, -1
+    stk(2, 1)
+    next()
+
+.next_slot:
+    inc     r9
+    cmp     r9, r10
+    jb      .slot_loop
+
+.not_found:
+    ; ( c-addr u -- c-addr u 0 ); spill u to a new slot, set TOS = 0.
+    ; The slot-scan loop above overwrites TOS (rax) with slot pointers,
+    ; so the original u is gone from TOS by the time we get here. Use
+    ; rcx, which still holds u from the function prologue.
+    mov     [DSP - cell], rcx
+    xor     TOS, TOS
+    stk(2, 3)
+    next()
+endp()
+
+; check-local-store  ( c-addr u -- true | c-addr u false )
+;     Scans the user_LOCALS_TABLE for a name matching (c-addr,u).
+;     On match: emits a 15-byte inline store sequence at HERE and
+;     returns true (consuming c-addr u).
+;       49 89 87 <disp32>  mov [r15+disp32], rax  ; store TOS to local
+;       48 8B 45 00        mov rax, [rbp+0]        ; pop: load NOS into TOS
+;       48 83 C5 08        add rbp, 8              ; adjust DSP
+;     On no match: returns false leaving c-addr u intact.
+;     Called by `to` when compiling inside a definition with active locals.
+;
+;     R13 is preserved (interp_source's tie-breaker lives there across
+;     primitive calls).
+proc(check_local_store_word)
+    mov     rcx, TOS                            ; u = name length
+    mov     rsi, [DSP]                           ; c-addr
+
+    mov     r10, [UP + user_LOCALS_COUNT]
+    test    r10, r10
+    jz      .not_found
+
+    lea     r11, [UP + user_LOCALS_TABLE]
+    xor     r9, r9                                ; slot index
+.slot_loop:
+    mov     rax, r9
+    shl     rax, 5                                ; *32
+    add     rax, r11                              ; slot ptr
+
+    movzx   rdx, byte ptr [rax]                  ; slot's name length
+    cmp     rdx, rcx
+    jne     .next_slot
+
+    ; Lengths match -- compare bytes.
+    xor     r8, r8
+.cmp_loop:
+    cmp     r8, rcx
+    je      .matched
+    mov     dl, byte ptr [rsi + r8]
+    cmp     dl, byte ptr [rax + 1 + r8]
+    jne     .next_slot
+    inc     r8
+    jmp     .cmp_loop
+
+.matched:
+    ; Read the byte-offset and emit the inline store at HERE.
+    mov     rdx, [rax + 16]
+    mov     rdi, [UP + user_HERE]
+
+    ; 49 89 87 <disp32>  mov [r15+disp32], rax  (7 bytes)
+    mov     byte ptr [rdi + 0], 0x49
+    mov     byte ptr [rdi + 1], 0x89
+    mov     byte ptr [rdi + 2], 0x87
+    mov     dword ptr [rdi + 3], edx
+    ; 48 8B 45 00  mov rax, [rbp+0]  (4 bytes)
+    mov     byte ptr [rdi + 7], 0x48
+    mov     byte ptr [rdi + 8], 0x8B
+    mov     byte ptr [rdi + 9], 0x45
+    mov     byte ptr [rdi + 10], 0x00
+    ; 48 83 C5 08  add rbp, 8  (4 bytes)
+    mov     byte ptr [rdi + 11], 0x48
+    mov     byte ptr [rdi + 12], 0x83
+    mov     byte ptr [rdi + 13], 0xC5
+    mov     byte ptr [rdi + 14], 0x08
+    add     rdi, 15
+    mov     [UP + user_HERE], rdi
+
+    ; ( c-addr u -- -1 )
+    mov     TOS, -1
+    stk(2, 1)
+    next()
+
+.next_slot:
+    inc     r9
+    cmp     r9, r10
+    jb      .slot_loop
+
+.not_found:
+    ; ( c-addr u -- c-addr u 0 ); spill u to a new slot, set TOS = 0.
+    ; Same TOS-clobbering as check_local_emit_word above — use rcx,
+    ; which still holds u from the function prologue.
+    mov     [DSP - cell], rcx
+    xor     TOS, TOS
+    stk(2, 3)
+    next()
+endp()

@@ -1,0 +1,1 @@
+0e 0e 0e 0e 4 fractal-iter . cr bye

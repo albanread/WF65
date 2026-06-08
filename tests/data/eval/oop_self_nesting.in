@@ -1,0 +1,17 @@
+# requires: (send) self
+# Nested send must save/restore self: outer reads its own ivar, sends to
+# another object (which sets then restores self), then reads its ivar again.
+# Correct result is 11 + 22 + 11 = 44.  A broken restore would give 55.
+create cls 16 256 cells + allot
+create oa 2 cells allot
+create ob 2 cells allot
+cls oa !
+cls ob !
+11 oa 8 + !
+22 ob 8 + !
+: getx self 8 + @ ;
+: outer self 8 + @ ob 5 (send) + self 8 + @ + ;
+' getx cls 16 + 5 cells + !
+' outer cls 16 + 6 cells + !
+oa 6 (send) .
+bye

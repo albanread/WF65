@@ -1,0 +1,587 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — Facility-ext primitives (MS, UTIME, TIME&DATE).
+;
+; Calls Win32 APIs directly via @extern + win64_call.  We don't pull in
+; the whole kernel32.masm — just the four symbols we need — because the
+; full set costs ~1100 LoadLibrary/AddFunction calls at session boot.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+@extern "KERNEL32.dll" Sleep(1)
+@extern "KERNEL32.dll" GetLocalTime(1)
+@extern "KERNEL32.dll" QueryPerformanceCounter(1)
+@extern "KERNEL32.dll" QueryPerformanceFrequency(1)
+@extern "KERNEL32.dll" GetProcessHeap(0)
+@extern "KERNEL32.dll" HeapAlloc(3)
+@extern "KERNEL32.dll" HeapFree(3)
+@extern "KERNEL32.dll" HeapReAlloc(4)
+@extern "KERNEL32.dll" CreateFileA(7)
+@extern "KERNEL32.dll" CloseHandle(1)
+@extern "KERNEL32.dll" ReadFile(5)
+@extern "KERNEL32.dll" WriteFile(5)
+@extern "KERNEL32.dll" DeleteFileA(1)
+@extern "KERNEL32.dll" SetFilePointerEx(4)
+@extern "KERNEL32.dll" GetFileSizeEx(2)
+@extern "KERNEL32.dll" FlushFileBuffers(1)
+@extern "KERNEL32.dll" MoveFileExA(3)
+
+; ms  ( u -- )
+;     Block for at least u milliseconds.
+proc(ms_word)
+    mov     rcx, TOS              ; arg1 = ms
+    win64_call(Sleep)
+    mov     TOS, [DSP]            ; raise NOS into TOS
+    stk(1, 0)
+    next()
+endp()
+
+; utime  ( -- ud )
+;     Wall-clock microseconds as an unsigned double cell.
+;     ud = QueryPerformanceCounter() * 1_000_000 / QueryPerformanceFrequency().
+proc(utime_word)
+    ; Use PAD as scratch for the two i64 outputs.
+    lea     rcx, [UP + user_PAD]
+    win64_call(QueryPerformanceCounter)
+    lea     rcx, [UP + user_PAD + 8]
+    win64_call(QueryPerformanceFrequency)
+
+    ; rax := counter * 1_000_000 / freq  using 128-bit intermediate.
+    mov     rax, [UP + user_PAD]              ; counter
+    mov     rcx, 1000000
+    mul     rcx                                ; rdx:rax = counter * 1e6
+    mov     rcx, [UP + user_PAD + 8]          ; freq
+    div     rcx                                ; rax = quotient, rdx = remainder
+
+    ; Push as double cell ( low high ); both nonneg, so high is 0.
+    mov     [DSP - cell], TOS                  ; preserve old TOS
+    mov     [DSP - 2*cell], rax                ; new NOS = low microseconds
+    xor     TOS, TOS                            ; high = 0
+    stk(0, 2)
+    next()
+endp()
+
+; time&date  ( -- sec min hour day month year )
+;     Local-time components from GetLocalTime.  The Win32 SYSTEMTIME
+;     struct is 8 u16 fields = 16 bytes, written to a scratch buffer.
+;     Layout: wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds.
+proc(time_and_date_word)
+    lea     rcx, [UP + user_PAD]
+    win64_call(GetLocalTime)
+
+    ; Read SYSTEMTIME fields (each is u16, zero-extend).
+    lea     rax, [UP + user_PAD]
+    movzx   r8,  word ptr [rax + 0]            ; year
+    movzx   r9,  word ptr [rax + 2]            ; month
+    movzx   r10, word ptr [rax + 6]            ; day
+    movzx   r11, word ptr [rax + 8]            ; hour
+    movzx   rcx, word ptr [rax + 10]           ; minute
+    movzx   rdx, word ptr [rax + 12]           ; second
+
+    ; Push six cells:  bottom = sec, top = year.
+    ;   [DSP - 1*cell] = NNNNNNOS slot = old TOS preserved
+    ;   [DSP - 2*cell] = NNNNNOS = sec
+    ;   [DSP - 3*cell] = NNNNOS  = min
+    ;   [DSP - 4*cell] = NNNOS   = hour
+    ;   [DSP - 5*cell] = NNOS    = day
+    ;   [DSP - 6*cell] = NOS     = month
+    ;   TOS                       = year
+    mov     [DSP - cell],    TOS
+    mov     [DSP - 2*cell],  rdx                ; sec
+    mov     [DSP - 3*cell],  rcx                ; min
+    mov     [DSP - 4*cell],  r11                ; hour
+    mov     [DSP - 5*cell],  r10                ; day
+    mov     [DSP - 6*cell],  r9                 ; month
+    mov     TOS, r8                              ; year
+    stk(0, 6)
+    next()
+endp()
+
+; ── Memory-Allocation word set (HeapAlloc / HeapFree / HeapReAlloc) ──────
+
+; allocate  ( u -- a-addr ior )
+;     Allocate u bytes from the process heap.  ior=0 on success.
+proc(allocate_word)
+    mov     r13, TOS                       ; r13 = size (preserved across calls)
+    win64_call(GetProcessHeap)
+    mov     rcx, rax                       ; arg1 = heap handle
+    xor     rdx, rdx                       ; arg2 = flags = 0
+    mov     r8,  r13                       ; arg3 = size
+    win64_call(HeapAlloc)
+    test    rax, rax
+    jz      .alloc_fail
+
+    mov     [DSP - cell], rax              ; new NOS = addr
+    xor     TOS, TOS                       ; new TOS = 0 (success)
+    stk(1, 2)
+    next()
+
+.alloc_fail:
+    mov     qword ptr [DSP - cell], 0      ; new NOS = 0
+    mov     TOS, -59                       ; new TOS = -59 (alloc failure)
+    stk(1, 2)
+    next()
+endp()
+
+; free  ( a-addr -- ior )
+;     Return a previously allocated block to the heap.
+proc(free_word)
+    mov     r13, TOS                       ; r13 = addr
+    win64_call(GetProcessHeap)
+    mov     rcx, rax                       ; heap
+    xor     rdx, rdx                       ; flags
+    mov     r8,  r13                       ; addr
+    win64_call(HeapFree)
+    test    rax, rax
+    jnz     .free_ok
+    mov     TOS, -60                       ; ior = -60 on failure
+    next()
+.free_ok:
+    xor     TOS, TOS                       ; ior = 0
+    next()
+endp()
+
+; resize  ( a-addr1 u -- a-addr2 ior )
+;     Resize a previously allocated block; on failure, a-addr2 == a-addr1
+;     and the original block is unchanged.
+proc(resize_word)
+    mov     r13, TOS                       ; r13 = new size
+    mov     r14, [DSP]                     ; r14 = old addr
+    win64_call(GetProcessHeap)
+    mov     rcx, rax                       ; heap
+    xor     rdx, rdx                       ; flags
+    mov     r8,  r14                       ; old addr
+    mov     r9,  r13                       ; new size
+    win64_call(HeapReAlloc)
+    test    rax, rax
+    jz      .resize_fail
+    mov     [DSP], rax                     ; NOS = new addr
+    xor     TOS, TOS                       ; TOS = 0
+    next()
+.resize_fail:
+    ; [DSP] still holds the original a-addr1 (we never wrote it).
+    mov     TOS, -61                       ; ior = -61
+    next()
+endp()
+
+; ── File-Access (CreateFileA / ReadFile / WriteFile / CloseHandle / DeleteFileA)
+
+; ── Macros for the open/create path ──────────────────────────────────────
+;
+; The macros below use the `.^label` syntax: a label reference that
+; resolves in the enclosing @scope (the proc body) instead of the macro's
+; own invocation scope.  Without it, jumps from inside a macro that target
+; proc-local labels are mangled into the macro's scope and end up nowhere.
+
+; Copy (rsi, rcx) → PAD with a null terminator, clamping rcx to 255.
+@macro path_to_pad()
+    cmp     rcx, 255
+    jbe     .ctp_ok
+    mov     rcx, 255
+.ctp_ok:
+    lea     rdi, [UP + user_PAD]
+    rep     movsb
+    mov     byte ptr [rdi], 0
+@endmacro
+
+; Translate r14 (small fam: 1=r/o, 2=w/o, 3=r/w; BIN bit ignored) to a
+; Win32 access mask in r13.  On invalid fam, jumps to .open_fail_inv in
+; the calling proc (via the .^ outer-scope label sigil).
+;
+; R15 is reserved as the locals-stack pointer (LP) and must not be
+; touched by primitives; we use r14 instead.
+@macro fam_to_access()
+    mov     rax, r14
+    and     eax, 7
+    cmp     eax, 1
+    je      .fma_ro
+    cmp     eax, 2
+    je      .fma_wo
+    cmp     eax, 3
+    je      .fma_rw
+    jmp     .^open_fail_inv
+.fma_ro:
+    mov     r13, 0x80000000
+    jmp     .fma_done
+.fma_wo:
+    mov     r13, 0x40000000
+    jmp     .fma_done
+.fma_rw:
+    mov     r13, 0xC0000000
+.fma_done:
+@endmacro
+
+; Inline CreateFileA call with the supplied disposition (OPEN_EXISTING=3
+; or CREATE_ALWAYS=2).  Jumps to .open_fail in the calling proc on
+; INVALID_HANDLE_VALUE; falls through to success.
+@macro create_file_call(disposition)
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 64
+    lea     rcx, [UP + user_PAD]
+    mov     rdx, r13
+    xor     r8, r8
+    xor     r9, r9
+    mov     qword ptr [rsp + 32], &disposition
+    mov     qword ptr [rsp + 40], 0x80
+    mov     qword ptr [rsp + 48], 0
+    call    CreateFileA
+    mov     rsp, r12
+    cmp     rax, -1
+    je      .^open_fail
+@endmacro
+
+; open-file  ( c-addr u fam -- fileid ior )
+proc(open_file_word)
+    mov     r14, TOS
+    mov     rsi, [DSP + cell]
+    mov     rcx, [DSP]
+    path_to_pad()
+    fam_to_access()
+    create_file_call(3)                              ; OPEN_EXISTING
+    mov     [DSP + cell], rax
+    xor     TOS, TOS
+    stk(3, 2)
+    next()
+.open_fail:
+    mov     qword ptr [DSP + cell], 0
+    mov     TOS, -62
+    stk(3, 2)
+    next()
+.open_fail_inv:
+    mov     qword ptr [DSP + cell], 0
+    mov     TOS, -36
+    stk(3, 2)
+    next()
+endp()
+
+; create-file  ( c-addr u fam -- fileid ior )
+proc(create_file_word)
+    mov     r14, TOS
+    mov     rsi, [DSP + cell]
+    mov     rcx, [DSP]
+    path_to_pad()
+    fam_to_access()
+    create_file_call(2)                              ; CREATE_ALWAYS
+    mov     [DSP + cell], rax
+    xor     TOS, TOS
+    stk(3, 2)
+    next()
+.open_fail:
+    mov     qword ptr [DSP + cell], 0
+    mov     TOS, -62
+    stk(3, 2)
+    next()
+.open_fail_inv:
+    mov     qword ptr [DSP + cell], 0
+    mov     TOS, -36
+    stk(3, 2)
+    next()
+endp()
+
+; close-file  ( fileid -- ior )
+proc(close_file_word)
+    mov     rcx, TOS
+    win64_call(CloseHandle)
+    test    rax, rax
+    jnz     .close_ok
+    mov     TOS, -63
+    next()
+.close_ok:
+    xor     TOS, TOS
+    next()
+endp()
+
+; read-file  ( c-addr u1 fileid -- u2 ior )
+;     Reads up to u1 bytes; returns u2 = actually read, ior = error code.
+;     R13 holds the fileid across the Win64 call (callee-saved).  We
+;     read c-addr from [DSP+cell] and u1 from [DSP] directly when
+;     building the call args — staging them in R14/R15 isn't needed
+;     and would burn registers reserved for the locals-stack pointer.
+proc(read_file_word)
+    mov     r13, TOS                            ; save fileid
+    lea     rdi, [UP + user_PAD]
+    mov     qword ptr [rdi], 0                  ; zero bytesRead output
+
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13                             ; handle
+    mov     rdx, [DSP + cell]                    ; buffer (c-addr) — read from memory
+    mov     r8,  [DSP]                           ; bytes to read (u1)
+    lea     r9,  [UP + user_PAD]
+    mov     qword ptr [rsp + 32], 0
+    call    ReadFile
+    mov     rsp, r12
+
+    test    rax, rax
+    jz      .read_fail
+
+    mov     rax, [UP + user_PAD]                 ; bytesRead
+    mov     [DSP + cell], rax                    ; new NOS = u2
+    xor     TOS, TOS
+    stk(3, 2)
+    next()
+
+.read_fail:
+    mov     qword ptr [DSP + cell], 0
+    mov     TOS, -64
+    stk(3, 2)
+    next()
+endp()
+
+; write-file  ( c-addr u fileid -- ior )
+proc(write_file_word)
+    mov     r13, TOS                            ; save fileid
+    lea     rdi, [UP + user_PAD]
+    mov     qword ptr [rdi], 0
+
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13
+    mov     rdx, [DSP + cell]                    ; buffer
+    mov     r8,  [DSP]                            ; u
+    lea     r9,  [UP + user_PAD]
+    mov     qword ptr [rsp + 32], 0
+    call    WriteFile
+    mov     rsp, r12
+
+    test    rax, rax
+    jnz     .write_ok
+    mov     TOS, -65
+    stk(3, 1)
+    next()
+.write_ok:
+    xor     TOS, TOS
+    stk(3, 1)
+    next()
+endp()
+
+; file-position  ( fileid -- ud ior )
+;     Current file pointer as an unsigned double cell.
+;     Implementation note on 64-bit: high cell is always 0 (we already
+;     have 64 bits of range in the low cell).
+proc(file_position_word)
+    mov     r13, TOS                            ; handle
+    mov     qword ptr [UP + user_PAD], 0
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13                             ; handle
+    xor     rdx, rdx                             ; distance = 0
+    lea     r8,  [UP + user_PAD]                 ; &newPos
+    mov     r9d, 1                                ; FILE_CURRENT
+    call    SetFilePointerEx
+    mov     rsp, r12
+
+    test    rax, rax
+    jz      .pos_fail
+    mov     rax, [UP + user_PAD]
+    mov     qword ptr [DSP - 2*cell], 0          ; high = 0
+    mov     [DSP - cell], rax                    ; low = position
+    xor     TOS, TOS
+    stk(1, 3)
+    next()
+.pos_fail:
+    mov     qword ptr [DSP - 2*cell], 0
+    mov     qword ptr [DSP - cell], 0
+    mov     TOS, -67
+    stk(1, 3)
+    next()
+endp()
+
+; file-size  ( fileid -- ud ior )
+proc(file_size_word)
+    mov     r13, TOS
+    mov     qword ptr [UP + user_PAD], 0
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 32
+    mov     rcx, r13
+    lea     rdx, [UP + user_PAD]
+    call    GetFileSizeEx
+    mov     rsp, r12
+
+    test    rax, rax
+    jz      .size_fail
+    mov     rax, [UP + user_PAD]
+    mov     qword ptr [DSP - 2*cell], 0
+    mov     [DSP - cell], rax
+    xor     TOS, TOS
+    stk(1, 3)
+    next()
+.size_fail:
+    mov     qword ptr [DSP - 2*cell], 0
+    mov     qword ptr [DSP - cell], 0
+    mov     TOS, -68
+    stk(1, 3)
+    next()
+endp()
+
+; reposition-file  ( ud fileid -- ior )
+;     Seek to absolute position ud (high cell ignored on 64-bit).
+proc(reposition_file_word)
+    mov     r13, TOS                            ; handle
+    mov     r14, [DSP + cell]                    ; low cell of ud
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13
+    mov     rdx, r14                             ; distance
+    xor     r8, r8                               ; lpNewFilePointer = NULL
+    xor     r9, r9                               ; FILE_BEGIN
+    call    SetFilePointerEx
+    mov     rsp, r12
+
+    test    rax, rax
+    jz      .seek_fail
+    xor     TOS, TOS
+    stk(3, 1)
+    next()
+.seek_fail:
+    mov     TOS, -69
+    stk(3, 1)
+    next()
+endp()
+
+; write-line  ( c-addr u fileid -- ior )
+;     Write the buffer followed by a CR/LF terminator.
+;     R13 carries the fileid across both Win64 calls (callee-saved).
+;     The data-stack memory still holds c-addr/u while we're in this
+;     proc — we read them directly instead of staging in R14/R15.
+proc(write_line_word)
+    mov     r13, TOS                            ; save fileid
+    mov     qword ptr [UP + user_PAD], 0
+
+    ; First WriteFile: the data buffer.
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13
+    mov     rdx, [DSP + cell]                    ; buffer
+    mov     r8,  [DSP]                            ; u
+    lea     r9,  [UP + user_PAD]
+    mov     qword ptr [rsp + 32], 0
+    call    WriteFile
+    mov     rsp, r12
+    test    rax, rax
+    jz      .wl_fail
+
+    ; Second WriteFile: CRLF at PAD+16.
+    mov     byte ptr [UP + user_PAD + 16], 13
+    mov     byte ptr [UP + user_PAD + 17], 10
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     rcx, r13
+    lea     rdx, [UP + user_PAD + 16]
+    mov     r8, 2
+    lea     r9, [UP + user_PAD]
+    mov     qword ptr [rsp + 32], 0
+    call    WriteFile
+    mov     rsp, r12
+    test    rax, rax
+    jz      .wl_fail
+
+    xor     TOS, TOS
+    stk(3, 1)
+    next()
+.wl_fail:
+    mov     TOS, -65
+    stk(3, 1)
+    next()
+endp()
+
+; flush-file  ( fileid -- ior )
+proc(flush_file_word)
+    mov     rcx, TOS
+    win64_call(FlushFileBuffers)
+    test    rax, rax
+    jnz     .flush_ok
+    mov     TOS, -71
+    next()
+.flush_ok:
+    xor     TOS, TOS
+    next()
+endp()
+
+; rename-file  ( c-addr1 u1 c-addr2 u2 -- ior )
+;     Rename (or move) from name1 to name2.  Paths clamped to 127 bytes
+;     each; PAD is split into [0..127] for the source and [128..255]
+;     for the destination.
+;
+;     Reads args directly from data-stack memory — no register staging
+;     needed since both copies are done before any Win64 call clobbers
+;     the volatile registers, and the data stack memory persists until
+;     stk(4, 1) at the bottom of the proc.
+proc(rename_file_word)
+    ; Copy old name (c-addr1, u1) to PAD[0..127].
+    mov     rcx, [DSP + cell]                       ; u1
+    cmp     rcx, 127
+    jbe     .old_ok
+    mov     rcx, 127
+.old_ok:
+    mov     rsi, [DSP + 2*cell]                     ; c-addr1
+    lea     rdi, [UP + user_PAD]
+    rep     movsb
+    mov     byte ptr [rdi], 0
+
+    ; Copy new name (c-addr2, u2) to PAD[128..255].
+    mov     rcx, TOS                                ; u2
+    cmp     rcx, 127
+    jbe     .new_ok
+    mov     rcx, 127
+.new_ok:
+    mov     rsi, [DSP]                              ; c-addr2
+    lea     rdi, [UP + user_PAD + 128]
+    rep     movsb
+    mov     byte ptr [rdi], 0
+
+    ; MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING=1)
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 32
+    lea     rcx, [UP + user_PAD]
+    lea     rdx, [UP + user_PAD + 128]
+    mov     r8d, 1
+    call    MoveFileExA
+    mov     rsp, r12
+
+    test    rax, rax
+    jnz     .rename_ok
+    mov     TOS, -70
+    stk(4, 1)
+    next()
+.rename_ok:
+    xor     TOS, TOS
+    stk(4, 1)
+    next()
+endp()
+
+; delete-file  ( c-addr u -- ior )
+proc(delete_file_word)
+    mov     rcx, TOS                            ; u
+    mov     rsi, [DSP]                           ; c-addr
+    path_to_pad()
+
+    lea     rcx, [UP + user_PAD]
+    win64_call(DeleteFileA)
+
+    test    rax, rax
+    jnz     .del_ok
+    mov     TOS, -66
+    stk(2, 1)
+    next()
+.del_ok:
+    xor     TOS, TOS
+    stk(2, 1)
+    next()
+endp()

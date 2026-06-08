@@ -1,0 +1,93 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — bitwise / logic primitives.
+;
+; Direct register-rename ports of WF32 gkernel32.fs:481-555.
+; Each primitive matches WF32's shape; ported via `cargo run --bin
+; port-wf32`.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; and  ( n1 n2 -- n3 )    bitwise AND. Asm sym `and_` because plain
+;                          `and` is an x86 mnemonic — JASM would expand
+;                          the user macro into the instruction.
+proc(and_)
+    and     rax, [rbp]
+    stk(2, 1)
+    next()
+endp()
+
+; or  ( n1 n2 -- n3 )     bitwise OR. Same naming reason as `and`.
+proc(or_)
+    or      rax, [rbp]
+    stk(2, 1)
+    next()
+endp()
+
+; invert  ( n1 -- n2 )    bitwise NOT (one's complement).
+proc(invert)
+    not     rax
+    stk(1, 1)
+    next()
+endp()
+
+; lshift  ( u1 n -- u2 )  shift u1 left by n bits.
+;     Loads count into cl (the only valid count register for `shl`).
+;     n is TOS, u1 is NOS.
+proc(lshift)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    shl     rax, cl
+    stk(2, 1)
+    next()
+endp()
+
+; xor  ( n1 n2 -- n3 )    bitwise XOR
+proc(xor_)
+    xor     rax, [rbp]
+    stk(2, 1)
+    next()
+endp()
+
+; rshift  ( u1 n -- u2 )   logical (unsigned) right shift
+proc(rshift)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    shr     rax, cl
+    stk(2, 1)
+    next()
+endp()
+
+; arshift  ( n1 n -- n2 )  arithmetic (signed) right shift
+proc(arshift)
+    mov     rcx, rax
+    mov     rax, [rbp]
+    sar     rax, cl
+    stk(2, 1)
+    next()
+endp()
+
+; on  ( addr -- )    store -1 (all bits) at addr
+proc(on)
+    or      qword ptr [rax], -1
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()
+
+; off  ( addr -- )   store 0 at addr
+;     WF32 emits `and dword { eax } 0` which is one byte shorter
+;     than `mov dword { eax } 0`. WF64 inherits the trick (qword now).
+proc(off)
+    and     qword ptr [rax], 0
+    mov     rax, [rbp]
+    stk(1, 0)
+    next()
+endp()

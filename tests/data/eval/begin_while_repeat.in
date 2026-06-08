@@ -1,0 +1,4 @@
+# requires: begin while repeat
+: count-while  BEGIN DUP WHILE DUP . 1- REPEAT DROP ;
+5 count-while
+bye

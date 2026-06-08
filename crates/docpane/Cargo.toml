@@ -1,0 +1,43 @@
+# docpane — the markdown + Mermaid render core, forked from DocCrate.
+# Shared by two front-ends: the standalone doc-crate.exe test harness
+# and the in-window igui doc-pane type.  Empty [workspace] isolates it
+# as its own root for standalone builds during the extraction; when the
+# UI binary consumes it as a path dep this table is ignored.
+[workspace]
+
+[package]
+name = "docpane"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "docpane"
+path = "src/lib.rs"
+
+[dependencies]
+pulldown-cmark = "0.12"
+windows-numerics = "0.3"
+# Our forked Mermaid parser — text -> diagram IR.  No default features:
+# the cli/png extras (clap, resvg, image) stay out.
+selkie-rs = { path = "../selkie", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_DirectWrite",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+]

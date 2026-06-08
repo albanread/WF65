@@ -1,0 +1,305 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — shared macros and register convention.
+;
+; Register conventions (carried over from the WF32 plan):
+;   RAX = TOS    (top of data stack — always cached in a register)
+;   RBP = DSP    (data stack pointer, points at NOS, grows downward)
+;   RBX = UP     (user area pointer — per-task state)
+;   RSP = rstack (return stack — also CPU call/ret stack since we STC)
+;   R12 = callee-saved scratch for Win64 callouts (RSP-save slot)
+;
+; Internal data-stack representation:
+;   - At kernel entry/exit, Rust sees a pure in-memory stack.
+;   - Inside the kernel, TOS is cached in RAX and DSP points at NOS.
+;   - Therefore depth is encoded by DSP relative to SP0:
+;       depth 0: DSP = SP0 + cell, TOS is stale/don't-care
+;       depth 1: DSP = SP0,        TOS is the only real item
+;       depth 2: DSP = SP0 - cell, TOS is top and [DSP] is NOS
+;   Any code that manufactures or consumes a call boundary, an
+;   interpreter dispatch, or an `execute` path must preserve this
+;   encoding exactly. Ordinary words should only reason in terms of the
+;   internal form above; only forth_main translates to/from Rust's
+;   memory-only wire format.
+;
+; Subroutine-threaded: every primitive ends with `ret` and every Forth
+; word called from a colon definition is invoked via `call`. There is
+; no inner interpreter dispatch loop — the CPU's call/ret IS the dispatch.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+@assign cell = 8
+@assert cell == 8, "WF64 requires 8-byte cells (this is x86-64)"
+
+@define TOS  rax
+@define DSP  rbp
+@define UP   rbx
+
+; ── User-area layout ─────────────────────────────────────────────────
+; All offsets are from RBX (the UP register). Variables are cell-sized
+; unless noted. The driver allocates a 128 MB region via VirtualAlloc2
+; with MEM_ADDRESS_REQUIREMENTS (within ±2 GB of the kernel), then
+; passes us four pointers: dsp_top, rsp_top, user_base, dict_base.
+;
+; Region layout:
+;   [base + 0x00000] — data stack region (256 KB; RBP starts at +0x40000, grows down)
+;   [base + 0x40000] — return stack region (256 KB; RSP starts at +0x80000, grows down)
+;   [base + 0x80000] — user area (256 KB; UP = +0x80000)
+;   [base + 0xC0000] — dictionary heap (127.25 MB; HERE starts here, grows up)
+@assign user_BASE        = 0x00      ; numeric base (10 default)
+@assign user_STATE       = 0x08      ; 0 = interpret, 1 = compile
+@assign user_LATEST      = 0x10      ; head of dictionary chain
+@assign user_HERE        = 0x18      ; bump pointer into dict heap
+@assign user_DICT_END    = 0x20      ; high limit of dict heap (overflow check)
+@assign user_SOURCE_ID   = 0x28      ; -1 = evaluate, 0 = stdin, n = file
+@assign user_SOURCE_ADDR = 0x30      ; pointer to source text
+@assign user_SOURCE_LEN  = 0x38      ; length of source text
+@assign user_TO_IN       = 0x40      ; current parse offset (>IN)
+@assign user_PARSE_BARRIER = 0x48    ; one-shot minimum >IN after restore-input
+@assign user_BYE_REQ     = 0x50      ; `bye` writes 1 here; quit checks it cooperatively
+@assign user_HOST_RSP    = 0x58      ; forth_main stashes host's RSP here on entry
+@assign user_DSP_SAVE    = 0x60      ; forth_main writes final logical_dsp here on exit
+@assign user_SP0         = 0x68      ; initial DSP at session boot (= dsp_top); read by `depth`
+@assign user_RSP_CURRENT = 0x70      ; forth's RSP across forth_main calls (so rstack persists)
+@assign user_LATESTXT    = 0x78      ; xt of the most recently created/updated definition
+@assign user_HANDLER     = 0x80      ; catch/throw handler chain head on the rstack
+@assign user_THROW_CODE  = 0x88      ; uncaught THROW code returned to the host
+@assign user_ROOT_HANDLER= 0x90      ; 3-cell synthetic root handler frame
+@assign user_FORGET_FENCE= 0x98      ; newest header that must not be forgotten
+@assign user_PAD         = 0x100     ; 256 bytes of scratch
+@assign user_SOURCE_BUF  = 0x200     ; 4 KB line buffer
+@assign source_buf_size  = 4096
+@assign user_DO_TMP0     = 0x1200    ; callable do-part1/do-part2 scratch: limit/bias base
+@assign user_DO_TMP1     = 0x1208    ; callable do-part1/do-part2 scratch: start/adjusted index
+@assign user_FP0         = 0x1210    ; empty floating-point stack pointer
+@assign user_FSP         = 0x1218    ; current floating-point stack pointer
+@assign user_FP_TMP      = 0x1220    ; float parser scratch (raw IEEE-754 bits)
+@assign user_FP_STACK    = 0x1300    ; 256-byte floating-point stack area
+@assign fp_stack_size    = 0x100
+@assign user_WORD_BUF    = 0x1400    ; 256-byte transient counted-string buffer for WORD
+@assign word_buf_size    = 0x100
+@assign user_CURRENT     = 0x1500    ; wid receiving new definitions
+@assign user_FORTH_WID   = 0x1508    ; built-in FORTH word list identifier
+@assign user_ORDER_COUNT = 0x1510    ; number of active search-order entries
+@assign user_INDEX_HERE  = 0x1518    ; downward-growing index arena pointer
+@assign user_INDEX_LATEST= 0x1520    ; newest overlay node by creation order
+@assign user_CONTEXT     = 0x1528    ; search order array, wid1 at slot 0
+@assign search_order_max = 16
+@assign user_TRACE       = 0x15A8    ; trace flag: 0 = off, 1 = on
+@assign user_LP0         = 0x15B0    ; initial locals-stack pointer (high end of LP region)
+@assign user_LP_LIMIT    = 0x15B8    ; low limit of locals stack (overflow check)
+@assign user_LOCALS_COUNT= 0x15C0    ; #locals declared in the current colon def (0 outside)
+@assign user_LOCALS_TABLE= 0x15C8    ; 16 slots * 32 bytes; per-slot layout:
+                                      ;   [+0]    : name length (u8, max 15)
+                                      ;   [+1..15]: name bytes
+                                      ;   [+16..23]: byte offset within frame (u64)
+                                      ;   [+24..31]: padding
+@assign user_TOOLS_WID   = 0x17C8    ; wid of the TOOLS wordlist (set at boot)
+@assign user_PRIVATE_WID = 0x17D0    ; wid of the PRIVATE wordlist (set at boot)
+@assign user_TAIL_CALL   = 0x17D8    ; HERE just after the most recently emitted CALL
+                                      ;   (0 if not preceded by a fresh CALL).  Used by
+                                      ;   ; and EXIT for tail-call optimisation.
+
+; ── HEAPPTR region (V1b GC root storage) ─────────────────────────────
+; A bump-allocated array of slots, each holding either nil (0) or a
+; tagged GC pointer (Wf64Layout's 3-bit tag scheme).  Declared via
+; `HEAPPTR name` from Forth; the slot is the sole place a GC pointer
+; lives long-term.  See docs/gc_design.md.
+;
+;   user_HEAPPTR_NEXT  : bump pointer (absolute address of next free slot)
+;                        initialised at boot to (UP + user_HEAPPTR_BASE)
+;   user_HEAPPTR_BASE  : first slot of the region
+;   heapptr_region_size: 4 KB = 512 slots, default
+;
+; The GC root scan walks [UP + user_HEAPPTR_BASE, user_HEAPPTR_NEXT)
+; one cell at a time, calling evac.visit_cell on each.
+@assign user_HEAPPTR_NEXT  = 0x17E0  ; bump pointer (abs addr; 0 == empty)
+@assign user_LITERAL_NEXT  = 0x17E8  ; bump pointer for compile-time literals
+@assign user_SELF          = 0x17F0  ; OOP: current message receiver (0 = none)
+@assign user_OOP_RECV_CLASS= 0x17F8  ; OOP: compile-time early-binding class hint
+@assign user_OOP_RECV_HERE = 0x1800  ; OOP: HERE just after the receiver compiled
+@assign user_OOP_IVARS_WID = 0x1808  ; OOP: wid of the per-class ivar wordlist
+@assign user_HEAPPTR_BASE  = 0x2000  ; first slot of the region
+@assign heapptr_region_size = 0x1000 ; 4 KB = 512 slots
+; Compile-time literal region — parallel to HEAPPTR, used by S$"
+; (and any future *.$" / V2s literal forms).  The GC root walk
+; covers both regions; LITERAL slots are monotonically retained
+; within a session (per V2s design — no per-forget reclamation in
+; stage B).  64 KB = 8 K slots.
+@assign user_LITERAL_BASE  = 0x3000
+@assign literal_region_size = 0x10000
+
+; ── Dictionary header layout ─────────────────────────────────────────
+; WF64 now models WF32's real header shape rather than the earlier
+; mini-header. LATEST still points at the header base, but find-name
+; returns the name token (nt), i.e. the counted string beginning at
+; dh_nt. The executable entry point lives in dh_xtptr.
+
+; Fields carried over from WF32's head% structure. `dh_comp` is kept
+; alongside `dh_ct` / `dh_xtptr` even though the current compile-mode
+; dispatcher only needs `dh_ct`; it lets upcoming dictionary words see
+; the same shape WF32 expects.
+@assign dh_link      = 0
+@assign dh_ct        = dh_link  + cell
+@assign dh_xtptr     = dh_ct    + cell
+@assign dh_comp      = dh_xtptr + cell
+@assign dh_rec       = dh_comp  + cell
+@assign dh_vfa       = dh_rec   + cell      ; word-sized in WF32, widened later below
+@assign dh_ofa       = dh_vfa   + 2
+@assign dh_stk       = dh_ofa   + 2
+@assign dh_tfa       = dh_stk   + 2
+@assign dh_nt        = dh_tfa   + 1         ; counted string: len byte then chars
+@assign dh_name      = dh_nt    + 1         ; first character byte
+
+; Minimal WF32-compatible type tags used so far.
+@assign tfa_tcol     = 0x82                 ; colon definition
+@assign tfa_tcre     = 0x91                 ; create definition
+@assign create_stub_size = 24               ; 19-byte stub + 5 pad bytes
+
+; ── Object-system class-struct layout (see docs/oop_design.md) ───────
+; A class struct is [ super | isize | vtable[CAP] ].  Only class_vt is
+; used by the MASM dispatch path; the Forth layer in lib/oop.f owns the
+; rest (CAP, vtable fill, inheritance copy-down).
+@assign class_super  = 0                    ; parent class struct ptr (0 = root)
+@assign class_isize  = cell                 ; instance size in bytes (incl header)
+@assign class_vt     = 2 * cell             ; base of the method vtable
+
+; ── Dictionary overlay layout ───────────────────────────────────────
+@assign wl_bucket_count = 512
+@assign wl_bucket_mask  = wl_bucket_count - 1
+@assign wl_size         = wl_bucket_count * cell
+
+@assign dn_bucket_next  = 0
+@assign dn_global_prev  = dn_bucket_next + cell
+@assign dn_header       = dn_global_prev + cell
+@assign dn_wid          = dn_header + cell
+@assign dn_hash         = dn_wid + cell      ; dword
+@assign dn_len          = dn_hash + 4        ; byte
+@assign dn_first        = dn_len + 1         ; byte
+@assign dn_size         = 40
+
+; ── stk ──────────────────────────────────────────────────────────────
+; `stk(in, out)` emits the data-stack-pointer adjustment for a primitive
+; with stack effect ( in -- out ). Mirrors WF32's `next;` macro's use
+; of `in/out` annotations. Implemented in Rust (in JASM's
+; wfasm::asm::macros::stk) because it needs arithmetic over its args.
+;
+; Net out > in → emits `sub rbp, (out-in)*cell`
+; Net out < in → emits `add rbp, (in-out)*cell`
+; Balanced     → emits nothing.
+@rust_macro stk
+
+; ── proc / endp ──────────────────────────────────────────────────────
+; Open a Forth primitive. No prologue is emitted — primitives don't have
+; one in STC. `endp()` closes the scope but does NOT emit `ret`; use
+; `next()` (or write `ret` yourself) where you want the return.
+@macro proc(name)
+    @scope &name
+    .quad 0
+    .globl &name
+&name:
+@endmacro
+
+@macro endp()
+    @endscope
+@endmacro
+
+; ── next ─────────────────────────────────────────────────────────────
+; STC "next": just `ret`. The caller's `call` pushed the return address;
+; `ret` pops it. Named for compatibility with WF32 idiom even though
+; in STC there is no inner-interpreter NEXT loop.
+@macro next()
+    ret
+@endmacro
+
+; ── pushd / popd ─────────────────────────────────────────────────────
+; Push a value onto the data stack. Old TOS spills to NOS, new value
+; becomes TOS.
+@macro pushd(val)
+    sub  DSP, cell          ; make room
+    mov  [DSP], TOS         ; spill old TOS to NOS
+    mov  TOS, &val          ; new TOS
+@endmacro
+
+; Drop TOS — raises NOS to TOS.
+@macro popd()
+    mov  TOS, [DSP]
+    add  DSP, cell
+@endmacro
+
+; ── win64_call ───────────────────────────────────────────────────────
+; Manual Win64 callout. Wraps the target with the shadow-space + RSP
+; alignment dance. The win32/*.masm wrappers do this internally; use
+; this directly only when calling something not in the generated set
+; (e.g., the Rust runtime functions via @extern).
+;
+; IMPORTANT: this macro only makes the Win64 ABI call itself correct.
+; It does NOT preserve the Forth machine state for you. In particular,
+; every Rust call must be treated as clobbering TOS because TOS lives in
+; RAX and RAX is the Win64 integer return register. If the pre-call TOS
+; still matters after the call, the caller must spill or recompute it.
+@macro win64_call(target)
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 32
+    call    &target
+    mov     rsp, r12
+@endmacro
+
+; ── pushd_call / pushd_call_or ───────────────────────────────────────
+; Push the return value of a Win64-ABI call onto the Forth data
+; stack, dodging the RAX/TOS clobber hazard.
+;
+; The hazard, in brief: TOS lives in RAX, and Win64 returns its
+; integer result in RAX.  Any callout effectively destroys the cached
+; TOS.  When the call's return value IS what we want to push, the
+; correct sequence is:
+;
+;   1. Spill the old cached TOS to the slot that will become the new
+;      NOS — *before* the call.
+;   2. Call (RAX is now the return value).
+;   3. Move RAX into TOS and bump DSP down by one cell.
+;
+; Caller sets up call args (RCX, RDX, R8, R9, etc.) *before* invoking
+; either macro.  These macros only touch RAX/RSP/R12 and the cell
+; immediately below DSP.
+;
+; `pushd_call(target)` commits the push unconditionally.  Use when
+; the target can't fail or when the caller doesn't care to check.
+;
+; `pushd_call_or(target, err_label)` checks RAX against -1 (u64::MAX,
+; our standard runtime-failure sentinel) and jumps to `err_label`
+; without modifying the stack on failure.  On success the push is
+; committed exactly as in pushd_call.
+
+@macro pushd_call(target)
+    mov  [DSP - cell], TOS
+    win64_call(&target)
+    mov  TOS, rax
+    sub  DSP, cell
+@endmacro
+
+@macro pushd_call_or(target, err_label)
+    mov  [DSP - cell], TOS
+    win64_call(&target)
+    cmp  rax, -1
+    je   &err_label
+    mov  TOS, rax
+    sub  DSP, cell
+@endmacro
+
+; ── brk ──────────────────────────────────────────────────────────────
+; Non-fatal breakpoint. The SEH handler catches `int 3`, dumps state
+; (all GPRs + 32 qwords of stack with symbolic resolution), advances
+; RIP past the byte, returns CONTINUE_EXECUTION. The function keeps
+; running. Drop one anywhere to inspect state without rebuilding.
+@macro brk()
+    int 3
+@endmacro

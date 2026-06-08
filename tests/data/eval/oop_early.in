@@ -1,0 +1,7 @@
+class widget cell ivar: w :m setw w ! ;m :m getw w @ ;m end-class
+widget new gw
+: store-gw 5 gw -> setw ;
+: load-gw gw -> getw ;
+store-gw
+load-gw .
+bye

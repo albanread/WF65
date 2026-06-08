@@ -1,0 +1,181 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — memory access primitives.
+;
+; Direct register-rename ports of WF32 (+ cell-size flip).
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; @  ( addr -- value )
+;     Fetch cell from address.
+proc(fetch)
+    mov     TOS, [TOS]
+    next()                           ; 1 in, 1 out — balanced
+endp()
+
+; !  ( value addr -- )
+;     Store cell at address. TOS = addr, NOS = value.
+proc(store)
+    mov     rcx, [DSP]               ; rcx = value (NOS)
+    mov     [TOS], rcx               ; *addr = value
+    mov     TOS, [DSP + cell]        ; raise NNOS to TOS
+    stk(2, 0)                        ; emit `add rbp, 16`
+    next()
+endp()
+
+; c@  ( addr -- byte )
+;     Fetch byte from address, zero-extended.
+proc(c_fetch)
+    movzx   TOS, byte ptr [TOS]
+    next()
+endp()
+
+; c!  ( byte addr -- )
+;     Store low byte of NOS at address.
+proc(c_store)
+    mov     rcx, [DSP]               ; rcx = value
+    mov     byte ptr [TOS], cl       ; *addr = low byte
+    mov     TOS, [DSP + cell]        ; raise NNOS to TOS
+    stk(2, 0)
+    next()
+endp()
+
+; here  ( -- addr )
+;     Return the next free dictionary address.
+proc(here_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_HERE]
+    stk(0, 1)
+    next()
+endp()
+
+; allot  ( n -- )
+;     Advance HERE by n bytes.
+proc(allot_word)
+    add     [UP + user_HERE], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; ─── Double-cell memory + non-std widths (ported via port-wf32) ───────
+; All from WF32 gkernel32.fs:277-368. Memory-width primitives didn't
+; carry `in/out` annotations in WF32 — the porter flagged them; stk
+; values added by hand here. L@/L! get a manual fix because the
+; mechanical port emitted `mov rax, [rax]` which is a full 64-bit
+; load — wrong for L (32-bit longword) semantics; we want the 32-bit
+; form with implicit upper-half zeroing.
+
+; 2@  ( a-addr -- x1 x2 )    fetch a cell pair. x2 at [addr], x1 at [addr+cell].
+proc(two_fetch)
+    mov     rcx, rax
+    mov     rax, [rcx]
+    mov     rdx, [rcx + cell]
+    mov     [rbp - cell], rdx
+    stk(1, 2)
+    next()
+endp()
+
+; 2!  ( x1 x2 a-addr -- )    store a cell pair.
+proc(two_store)
+    mov     rcx, [rbp]
+    mov     rdx, [rbp + cell]
+    mov     [rax], rcx
+    mov     [rax + cell], rdx
+    mov     rax, [rbp + 2*cell]
+    stk(3, 0)
+    next()
+endp()
+
+; b@  ( addr -- b )    fetch byte (unsigned, zero-extended)
+proc(b_fetch)
+    movzx   rax, byte ptr [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; sb@  ( addr -- b )   fetch byte (signed, sign-extended)
+proc(sb_fetch)
+    movsx   rax, byte ptr [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; b!  ( b addr -- )    store low byte at addr
+proc(b_store)
+    mov     rdx, [rbp]
+    mov     [rax], dl
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; w@  ( addr -- w )    fetch 16-bit word (unsigned)
+proc(w_fetch)
+    movzx   rax, word ptr [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; sw@  ( addr -- w )   fetch 16-bit word (signed)
+proc(sw_fetch)
+    movsx   rax, word ptr [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; w!  ( w addr -- )    store low 16 bits at addr
+proc(w_store)
+    mov     rcx, [rbp]
+    mov     [rax], cx
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; L@  ( addr -- n )    fetch 32-bit longword (unsigned)
+;     `mov eax, dword [rax]` does the 32-bit load with implicit
+;     zero-extension of the upper 32 bits of rax (x86-64 quirk).
+;     Manual fix from the porter's `mov rax, [rax]` which would
+;     read 64 bits (= a full cell, wrong for L).
+proc(l_fetch)
+    mov     eax, dword ptr [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; L!  ( n addr -- )    store low 32 bits at addr (upper 32 left intact)
+;     Manual fix: WF32's `mov { eax } ecx` on 32-bit was a 32-bit store;
+;     porter's `mov [rax], rcx` would be 64-bit. We want `mov [rax], ecx`.
+proc(l_store)
+    mov     rcx, [rbp]
+    mov     dword ptr [rax], ecx
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; q@  ( addr -- n )    fetch qword. On WF64 a qword IS a cell, so
+;                       q@ ≡ @. Kept as a separate proc for clarity
+;                       and because PRIMITIVES uses the asm sym `q_fetch`.
+proc(q_fetch)
+    mov     rax, [rax]
+    stk(1, 1)
+    next()
+endp()
+
+; q!  ( n addr -- )    store qword. On WF64 q! ≡ !.
+proc(q_store)
+    mov     rcx, [rbp]
+    mov     [rax], rcx
+    mov     rax, [rbp + cell]
+    stk(2, 0)
+    next()
+endp()

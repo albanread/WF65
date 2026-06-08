@@ -1,0 +1,11 @@
+# Verify the `0x` / `0X` / `-0x` literal prefix forces hex parsing,
+# regardless of the current BASE.  `.` always prints decimal (separate
+# concern), so the asserts are on the decoded integer value.
+0xFF .
+0x10 .
+-0xFF .
+0XFFCC66 .
+hex
+0xff .
+decimal
+bye

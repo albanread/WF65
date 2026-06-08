@@ -1,0 +1,9 @@
+# requires: base @ ! hex decimal
+base @ .
+16 base !
+base @ .
+hex
+2a .
+decimal
+base @ .
+bye

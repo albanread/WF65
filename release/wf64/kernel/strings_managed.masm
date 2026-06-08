@@ -1,0 +1,1893 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — managed-string primitives (V2s).
+;
+; The handle-first, GC-backed string library specified in
+; docs/strings_design.md.  Stage A: enough to allocate, measure,
+; expose for legacy interop, compare for equality, and store
+; through HEAPPTR slots.  The S$" literal form and the LITERAL
+; region come in stage B; the operations library ($+, $slice, …)
+; comes in stage C.
+;
+; Tag for String values is 100 (= 4).  Header word layout
+; (see src/gc/layout.rs):
+;   bits  0..4   type tag (HeapType, 5 bits)
+;   bits  5..28  length in bytes (24 bits)
+;   bits 29..63  GC bookkeeping
+;
+; Throw codes (shared with vec-*):
+;   -2058  generic GC error
+;   -2059  GC out of memory
+;   -2060  type mismatch (slot held something that wasn't a String)
+;   -2061  nil dereference
+;   -2062  builder capacity exceeded (V2s stage C1)
+;   -2063  invalid UTF-8 (V2s stage E — $validate, $upper/$lower
+;          on malformed input, char$ on a surrogate codepoint)
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+
+; >$  ( c-addr u -- $ )
+;     Allocate a managed String of u bytes and copy [c-addr, c-addr+u)
+;     into the payload.  Returns a tagged String pointer.  Auto-GC
+;     triggers on `should_collect` before allocating, same as
+;     vec-alloc-*; the source bytes live outside the GC heap so the
+;     collection can't move them.
+proc(to_string_word)
+    ; Stack: u in TOS, c-addr at [DSP].
+    ; Stash both in callee-saved regs (r13, r14) so they survive
+    ; rt_gc_auto_step.
+    mov     r14, TOS                                ; u (length)
+    mov     r13, [DSP]                              ; c-addr (source)
+    mov     rcx, UP
+    win64_call(rt_gc_auto_step)
+    mov     rcx, UP                                 ; arg1: up
+    mov     rdx, r13                                ; arg2: src_addr
+    mov     r8,  r14                                ; arg3: len
+    win64_call(rt_string_from_bytes)
+    cmp     rax, -1
+    je      .err
+    ; Success: ( c-addr u -- $ ) means 2 in, 1 out.  Replace TOS
+    ; with the tagged ptr; drop one cell from memory.
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.err:
+    ; Drop both operands, push throw code.
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2059
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $len  ( $ -- u )
+;     Byte length of a managed String.  Throws -2060 on a non-String
+;     handle, -2061 on nil.
+proc(string_len_word)
+    mov     r9, TOS                                 ; tagged
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4                                  ; TAG_STRING
+    jne     .wrong_type
+    and     r9, -8                                  ; strip tag
+    mov     r10, [r9]                               ; header word
+    shr     r10, 5                                  ; remove 5-bit type
+    mov     r11, 0xFFFFFF
+    and     r10, r11                                ; 24-bit length
+    mov     TOS, r10
+    next()
+
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $>addr  ( $ -- c-addr u )
+;     Expose the payload of a managed String as a legacy
+;     (address, length) pair for one-shot interop with TYPE / etc.
+;
+;     LIFETIME CONTRACT: the c-addr is valid only until the next
+;     allocation OR garbage collection.  Same rule as @heapptr.
+;     The intent is `my-msg @$ $>addr type` — never hold the addr
+;     across allocating code.
+proc(string_to_addr_word)
+    mov     r9, TOS                                 ; tagged
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong_type
+    and     r9, -8                                  ; strip tag → base
+    ; Extract length.
+    mov     r10, [r9]
+    shr     r10, 5
+    mov     r11, 0xFFFFFF
+    and     r10, r11                                ; r10 = byte length
+    ; Payload addr = base + 8 (skip the 1-cell header).
+    add     r9, 8                                   ; r9 = c-addr
+    ; Stack effect: 1 in, 2 out — push the addr as new NOS, length
+    ; replaces TOS.
+    mov     [DSP - cell], r9                        ; save c-addr at new NOS slot
+    mov     TOS, r10                                ; length in TOS
+    stk(0, 1)                                       ; sub DSP, cell
+    next()
+
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $=  ( $a $b -- f )
+;     Byte-exact equality of two managed Strings.  Returns -1
+;     (Forth true) if the bytes match, 0 otherwise.  Throws -2060
+;     on a non-String operand and -2061 on nil.
+;
+;     Heavy lifting is in rt_string_bytes_equal; the kernel side
+;     just type-checks both operands so wrong-type/nil throws
+;     surface through the same machinery as everywhere else.
+proc(string_equal_word)
+    ; Stack: $b in TOS, $a at [DSP].
+    ; Check $b.
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong_type
+    ; Check $a.
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil_deref
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong_type
+    ; Both are valid Strings.  Call the comparison helper.
+    mov     rcx, r11                                ; arg1: tagged_a
+    mov     rdx, r9                                 ; arg2: tagged_b
+    win64_call(rt_string_bytes_equal)
+    ; rax = -1 (true) or 0 (false).  Replace stack: ( $a $b -- f )
+    ; means 2 in, 1 out.
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+
+.wrong_type:
+    ; Drop both, throw -2060.
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; @$  ( handle -- $ )
+;     Fetch a managed String from a HEAPPTR slot.  Type-checks the
+;     slot's contents: passes nil through untouched (so callers can
+;     detect "never bound"), but throws -2060 if the slot holds
+;     something that isn't a String.
+;
+;     The "nil passes through" choice deliberately differs from
+;     vec-f@'s nil-deref-throws: a String handle that's never been
+;     assigned is a perfectly normal state ("the empty answer"),
+;     whereas calling vec-f@ on a nil slot is always a programming
+;     error.  Callers test with `dup 0=` if they care.
+proc(fetch_string_word)
+    mov     r9, TOS                                 ; handle (slot addr)
+    mov     r9, [r9]                                ; load tagged value
+    test    r9, r9
+    jz      .pass_nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong_type
+    mov     TOS, r9                                 ; replace handle with tagged $
+    next()
+.pass_nil:
+    mov     TOS, 0
+    next()
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+endp()
+
+
+; S$"  ( "ccc<quote>" -- $ )                            IMMEDIATE
+;     Compile or interpret a managed-string literal.
+;
+;     Interpret mode: allocate a fresh GC String containing the
+;     bytes between S$" and the closing quote, push the tagged
+;     pointer.  The bytes are copied — the source buffer is not
+;     referenced after this word returns.
+;
+;     Compile mode: allocate a slot in the LITERAL region, allocate
+;     a fresh GC String, store the tagged pointer in the slot, and
+;     emit a stub at HERE that pushes [slot_addr] at runtime.  The
+;     GC root walk covers both HEAPPTR and LITERAL regions, so the
+;     literal survives across collections; if the underlying String
+;     moves, the slot is rewritten in place and the runtime stub
+;     keeps seeing a valid pointer.
+;
+;     Throws -2058 on LITERAL region full or -2059 on alloc failure.
+proc(s_dollar_quote_word)
+    cmp     qword ptr [UP + user_STATE], 0
+    jne     .in_compile
+    ; ── Interpret mode ─────────────────────────────────────────
+    call    skip_optional_source_blank
+    mov     [DSP - cell], TOS
+    mov     TOS, 34                                 ; delimiter = '"'
+    stk(0, 1)
+    call    parse_word                              ; ( -- c-addr u )
+    call    to_string_word                          ; ( c-addr u -- $ )
+    next()
+.in_compile:
+    ; ── Compile mode ───────────────────────────────────────────
+    call    skip_optional_source_blank
+    mov     [DSP - cell], TOS
+    mov     TOS, 34
+    stk(0, 1)
+    call    parse_word                              ; ( -- c-addr u )
+    ; Hand (up, c-addr, u) to the runtime helper.
+    mov     rcx, UP
+    mov     rdx, [DSP]                              ; c-addr
+    mov     r8,  TOS                                ; u
+    win64_call(rt_s_literal_compile_at_here)
+    cmp     rax, -1
+    je      .err
+    ; Success: drop (c-addr u) from the data stack.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.err:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; ── Builder primitives (V2s stage C1) ───────────────────────────────
+;
+; Builders are mutable byte buffers used for incremental construction.
+; Tag = 0b101 (TAG_BUILDER).  Header is 2 cells:
+;   cell 0: standard type/length/GC word (type=5, length=bytes used)
+;   cell 1: capacity in bytes
+; Payload begins at base+16.  The GC walks total_cells = 2 +
+; ceil(capacity/8) — capacity, not length — so the full allocated
+; extent is always scanned regardless of how much the user has
+; appended.
+;
+; All builder primitives below type-check tag = 4 (Builder) and
+; throw -2060 on the wrong type, -2061 on nil.  The "would-exceed-
+; capacity" overflow throws -2062.
+
+
+; sb-new  ( capacity -- sb )
+;     Allocate a new builder with `capacity` bytes of usable
+;     payload.  Length starts at 0.  Throws -2059 on alloc failure.
+proc(sb_new_word)
+    ; Stack: capacity in TOS.
+    mov     rcx, UP                                 ; arg1: UP
+    mov     rdx, TOS                                ; arg2: capacity
+    win64_call(rt_sb_new)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax                                ; replace capacity with tagged sb
+    next()
+.err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+endp()
+
+
+; sb-len  ( sb -- bytes )
+;     Currently-used byte count from the builder's header word.
+proc(sb_len_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5                                  ; TAG_BUILDER
+    jne     .wrong_type
+    and     r9, -8                                  ; strip tag → base
+    mov     r10, [r9]                               ; header word
+    shr     r10, 5
+    mov     r11, 0xFFFFFF
+    and     r10, r11
+    mov     TOS, r10
+    next()
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; sb-capacity  ( sb -- bytes )
+;     Total allocated capacity (independent of how much is used).
+;     Useful for predicting whether further appends will fit.
+proc(sb_capacity_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    and     r9, -8
+    mov     r10, [r9 + 8]                           ; capacity word (cell 1)
+    mov     TOS, r10
+    next()
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; sb-clear  ( sb -- )
+;     Reset length to 0; capacity retained.  Doesn't zero the
+;     payload bytes — they're left as-is since the length field is
+;     authoritative.
+proc(sb_clear_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    and     r9, -8
+    ; Load header, clear bits 5..29 (length field), store back.
+    mov     r10, [r9]
+    mov     r11, 0xFFFFFF
+    shl     r11, 5
+    not     r11
+    and     r10, r11                                ; length := 0
+    mov     [r9], r10
+    ; Drop TOS.
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; sb-append$  ( $s sb -- )
+;     Append the contents of String $s to builder sb.  Throws
+;     -2060 on wrong types, -2061 on nil, -2062 on capacity
+;     overflow.
+proc(sb_append_string_word)
+    ; Stack: sb in TOS, $s at [DSP].
+    ; Check sb.
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    ; Check $s.
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil_deref
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4                                  ; TAG_STRING
+    jne     .wrong_type
+    ; Get source (string payload addr, length).
+    mov     r10, r11
+    and     r10, -8                                 ; string base
+    mov     r12, [r10]                              ; header
+    shr     r12, 5
+    mov     r13, 0xFFFFFF
+    and     r12, r13                                ; r12 = byte length
+    lea     r10, [r10 + 8]                          ; r10 = payload addr
+    ; Call rt_sb_append_bytes(sb_tagged, src_addr, len).
+    mov     rcx, r9                                 ; arg1: builder tagged
+    mov     rdx, r10                                ; arg2: src addr
+    mov     r8,  r12                                ; arg3: len
+    win64_call(rt_sb_append_bytes)
+    cmp     rax, -1
+    je      .overflow
+    ; Drop both args.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.overflow:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2062
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; sb-append-c  ( codepoint sb -- )
+;     Append the UTF-8 encoding of a single codepoint to the
+;     builder.  ASCII codepoints (< 128) take one byte; larger
+;     codepoints take up to 4 bytes.  Surrogates (0xD800..0xDFFF)
+;     and values > 0x10FFFF throw -2062.
+proc(sb_append_codepoint_word)
+    ; Stack: sb in TOS, codepoint at [DSP].
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    mov     r11, [DSP]                              ; codepoint
+    mov     rcx, r9
+    mov     rdx, r11
+    win64_call(rt_sb_append_codepoint)
+    cmp     rax, -1
+    je      .overflow
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.overflow:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2062
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; sb-append-n  ( n sb -- )
+;     Append the signed-decimal representation of n to the builder.
+proc(sb_append_int_word)
+    ; Stack: sb in TOS, n at [DSP].
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    mov     r11, [DSP]                              ; n (signed)
+    mov     rcx, r9
+    mov     rdx, r11
+    win64_call(rt_sb_append_int)
+    cmp     rax, -1
+    je      .overflow
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+.overflow:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2062
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; sb>string  ( sb -- $ )
+;     Finalise the builder: allocate a fresh immutable String of
+;     exactly the current length and copy the payload.  The
+;     builder's length is reset to 0 (capacity retained) so it can
+;     be reused.  Throws -2059 if the String allocation fails.
+proc(sb_to_string_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil_deref
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5
+    jne     .wrong_type
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_sb_to_string)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax                                ; replace sb with tagged $
+    next()
+.err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+.wrong_type:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil_deref:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; ── String operations (V2s stage C2) ────────────────────────────────
+
+
+; $+  ( $a $b -- $c )
+;     Allocate a fresh String containing $a's bytes followed by
+;     $b's.  Operands unchanged.  Throws -2060 on wrong type,
+;     -2061 on nil, -2059 on alloc failure.
+proc(string_concat_word)
+    ; Stack: $b in TOS, $a at [DSP].
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r11                                ; $a
+    mov     r8,  r9                                 ; $b
+    win64_call(rt_string_concat)
+    cmp     rax, -1
+    je      .alloc_err
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.alloc_err:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2059
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $slice  ( $h start end -- $s )
+;     Fresh String containing bytes [start, end) of $h.  end
+;     exclusive.  Throws -2058 on out-of-bounds, -2060 on wrong
+;     type, -2061 on nil.
+proc(string_slice_word)
+    ; Stack: end in TOS, start at [DSP], $h at [DSP+cell].
+    ; Type-check $h (NNOS).
+    mov     r9, [DSP + cell]                        ; $h
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Build args.
+    mov     rcx, UP                                 ; arg1: up
+    mov     rdx, r9                                 ; arg2: $h
+    mov     r8,  [DSP]                              ; arg3: start
+    mov     r9,  TOS                                ; arg4: end
+    win64_call(rt_string_slice)
+    cmp     rax, -1
+    je      .bounds
+    ; ( $h start end -- $s ): 3 in, 1 out.
+    mov     TOS, rax
+    stk(2, 0)
+    next()
+.bounds:
+    ; Drop 3, push -2058.
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $find  ( $needle $haystack -- byte-idx | -1 )
+;     First index of needle in haystack (byte search).  Empty
+;     needle returns 0.  Returns -1 if not found.
+proc(string_find_word)
+    mov     r9, TOS                                 ; $haystack
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]                              ; $needle
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_find)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; Helper macro thinking: $starts?, $ends?, $cmp, $ci= all share the
+; "type-check two Strings, call extern with (NOS, TOS), replace
+; with rax" pattern.  Inline each for clarity.
+
+
+; $starts?  ( $prefix $h -- f )
+proc(string_starts_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_starts)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $ends?  ( $suffix $h -- f )
+proc(string_ends_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_ends)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $cmp  ( $a $b -- n )    -1 / 0 / +1 (memcmp-style)
+proc(string_cmp_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_cmp)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $hash  ( $h -- u )
+proc(string_hash_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r9
+    win64_call(rt_string_hash)
+    mov     TOS, rax
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $ci=  ( $a $b -- f )   ASCII case-insensitive equality
+proc(string_ci_eq_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_ci_eq)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $trim, $ltrim, $rtrim  ( $h -- $s )
+;     ASCII whitespace trim, both/left/right.
+proc(string_trim_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_string_trim)
+    cmp     rax, -1
+    je      .alloc_err
+    mov     TOS, rax
+    next()
+.alloc_err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+proc(string_ltrim_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_string_ltrim)
+    cmp     rax, -1
+    je      .alloc_err
+    mov     TOS, rax
+    next()
+.alloc_err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+proc(string_rtrim_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_string_rtrim)
+    cmp     rax, -1
+    je      .alloc_err
+    mov     TOS, rax
+    next()
+.alloc_err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; n>$  ( n -- $s )
+;     Format signed integer n as a decimal String.
+proc(int_to_string_word)
+    mov     rcx, UP
+    mov     rdx, TOS
+    win64_call(rt_int_to_string)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax
+    next()
+.err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+endp()
+
+
+; $>n  ( $h -- n true | false )
+;     Parse $h as a signed decimal integer.  On success pushes the
+;     parsed value and -1 (true); on failure pushes only 0 (false).
+;     Leading/trailing whitespace is trimmed before parsing.
+proc(string_to_int_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Reserve a stack slot to hold the out value.  We'll use PAD
+    ; for this — needs no allocation, the result is read out
+    ; before we leave the proc.
+    lea     r10, [UP + user_PAD]
+    mov     rcx, r9
+    mov     rdx, r10
+    win64_call(rt_string_to_int)
+    test    rax, rax
+    jz      .parse_fail
+    ; rax = -1 (success).  Push value then -1.
+    ; Stack before: TOS = $h.  After: NOS = parsed_value, TOS = -1.
+    mov     r10, [UP + user_PAD]                    ; parsed value
+    mov     [DSP - cell], r10                       ; new NOS = parsed value
+    mov     TOS, -1                                 ; TOS = true
+    stk(0, 1)                                       ; one extra cell allocated
+    next()
+.parse_fail:
+    ; Replace $h with 0 (false).
+    mov     TOS, 0
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; empty$  ( -- $ )
+;     Push a fresh zero-length String.  Mostly useful as the
+;     starting value before a concatenation loop.  Uses
+;     pushd_call_or to dodge the TOS/RAX clobber documented on the
+;     macro.
+proc(empty_string_word)
+    mov     rcx, UP
+    xor     rdx, rdx                                ; src=0 (ignored when len=0)
+    xor     r8,  r8                                 ; len=0
+    pushd_call_or(rt_string_from_bytes, .err)
+    next()
+.err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+endp()
+
+
+; ── V2s stage D — extended operations ───────────────────────────────
+
+
+; $contains?  ( $needle $h -- f )
+;     True iff needle occurs anywhere in haystack (byte search).
+proc(string_contains_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_contains)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $rfind  ( $needle $h -- idx | -1 )
+;     Index of LAST occurrence of needle in haystack.  Empty
+;     needle returns haystack length.
+proc(string_rfind_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r11
+    mov     rdx, r9
+    win64_call(rt_string_rfind)
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $repeat  ( $h n -- $s )
+;     Fresh String containing $h concatenated n times.  n=0 yields
+;     an empty String.  Throws -2058 if result would overflow
+;     u32::MAX bytes.
+proc(string_repeat_word)
+    ; Stack: n in TOS, $h at [DSP].
+    mov     r9, [DSP]
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Build args: rcx=UP, rdx=$h, r8=n
+    mov     rcx, UP
+    mov     rdx, r9
+    mov     r8,  TOS
+    win64_call(rt_string_repeat)
+    cmp     rax, -1
+    je      .err
+    ; ( $h n -- $s ): 2 in, 1 out.
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.err:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $replace  ( $needle $repl $h -- $s )
+;     Substitute every occurrence of needle in h with repl.
+;     Empty needle returns h untouched (as a fresh copy).
+proc(string_replace_word)
+    ; Stack: $h in TOS, $repl at [DSP], $needle at [DSP+cell].
+    ; Type-check all three.
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r13, [DSP + cell]
+    test    r13, r13
+    jz      .nil
+    mov     r10, r13
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Call rt_string_replace(UP, needle, repl, haystack).
+    mov     rcx, UP
+    mov     rdx, r13                                ; $needle
+    mov     r8,  r11                                ; $repl
+    mov     r9,  TOS                                ; $h
+    win64_call(rt_string_replace)
+    cmp     rax, -1
+    je      .err
+    ; ( $needle $repl $h -- $s ): 3 in, 1 out.
+    mov     TOS, rax
+    stk(2, 0)
+    next()
+.err:
+    ; Drop 3, push -2059.
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2059
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + 2*cell]
+    add     DSP, 3*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $split  ( $sep $h -- $1 $2 ... $n n )
+;     Split haystack on every occurrence of sep, push each piece
+;     followed by the count.  Stack-shaped; appropriate for small
+;     splits (cap 32 pieces).  Throws -2058 if the split would
+;     exceed 32 parts, -2060 on wrong type, -2061 on nil, -2059
+;     on heap exhaustion during piece allocation.
+;
+;     Pre-trigger an auto-step before calling so the loop's piece
+;     allocations are unlikely to trip the fragmentation-retry
+;     path (which could move earlier pieces — see the no-retry
+;     note on rt_string_split_into).
+proc(string_split_word)
+    ; Stack: $h in TOS, $sep at [DSP].
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     r11, [DSP]
+    test    r11, r11
+    jz      .nil
+    mov     r10, r11
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Stash inputs (r13 = sep, r14 = haystack) and auto-step.
+    mov     r13, r11
+    mov     r14, r9
+    mov     rcx, UP
+    win64_call(rt_gc_auto_step)
+    ; Call rt_string_split_into(UP, sep, haystack, PAD, 32).
+    mov     rcx, UP
+    mov     rdx, r13
+    mov     r8,  r14
+    lea     r9,  [UP + user_PAD]
+    ; rt_string_split_into has 5 args.  Win64 passes 1-4 in
+    ; rcx/rdx/r8/r9; arg 5 (max_parts) goes on the stack at
+    ; [rsp+32] (above the 32-byte shadow).  win64_call macro only
+    ; handles the 4-arg case, so do the alignment dance manually.
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48                                 ; 32 shadow + 16 for arg5
+    mov     qword ptr [rsp + 32], 32                ; arg5: max_parts
+    call    rt_string_split_into
+    mov     rsp, r12
+    cmp     rax, -1
+    je      .err
+    ; rax = count of pieces emitted into PAD.
+    ; Now push pieces onto data stack (in order), followed by count.
+    ; Stack effect before:  TOS=$h, [DSP]=$sep.  We drop these two
+    ; and then push N + 1 cells.
+    ;
+    ; Drop the inputs first.  After this DSP points at the original
+    ; NNOS.
+    add     DSP, cell                               ; drop one cell ($sep slot)
+    ; TOS now temporarily invalid (we'll fix when committing).
+    ; Stash count in r14.
+    mov     r14, rax
+    ; Loop: push each piece from PAD onto stack.
+    xor     r13, r13                                ; index i = 0
+    test    r14, r14
+    jz      .push_count                             ; zero pieces — just push 0
+    ; Push first piece into TOS (consumes the slot we just dropped).
+    lea     r11, [UP + user_PAD]
+    mov     TOS, [r11]
+    inc     r13
+    cmp     r13, r14
+    jge     .push_count
+.push_piece:
+    ; Push subsequent pieces via standard pattern.
+    mov     [DSP - cell], TOS
+    mov     TOS, [r11 + r13 * cell]
+    sub     DSP, cell
+    inc     r13
+    cmp     r13, r14
+    jl      .push_piece
+.push_count:
+    ; Final: push the count.
+    mov     [DSP - cell], TOS
+    mov     TOS, r14
+    sub     DSP, cell
+    next()
+.err:
+    ; Drop ($sep $h), throw -2058 / -2059 (we use 2058 for both;
+    ; the kernel can't easily distinguish here without an out-param).
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; ── V2s stage E — UTF-8, floats, char$, $words ──────────────────────
+
+
+; $clen  ( $h -- chars )
+;     Codepoint count.  O(n) scan of the UTF-8 payload.  Throws
+;     -2063 on malformed UTF-8.  New throw code: -2063 = invalid
+;     UTF-8 (see throw-codes section at top of file).
+proc(string_clen_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r9
+    win64_call(rt_string_clen)
+    cmp     rax, -1
+    je      .invalid
+    mov     TOS, rax
+    next()
+.invalid:
+    mov     TOS, -2063
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $c@  ( $h char-idx -- codepoint )
+;     Codepoint at character index.  Throws -2058 on out-of-bounds,
+;     -2063 on malformed UTF-8.
+proc(string_cat_word)
+    ; Stack: char-idx in TOS, $h at [DSP].
+    mov     r9, [DSP]
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r9
+    mov     rdx, TOS
+    win64_call(rt_string_cat)
+    cmp     rax, -1
+    je      .bounds
+    mov     TOS, rax
+    stk(1, 0)
+    next()
+.bounds:
+    ; Drop both, push -2058.  (Either OOB or malformed UTF-8 — the
+    ; Rust side prints a more specific stderr message either way.)
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2058
+    stk(0, 1)
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2061
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()
+
+
+; $valid?  ( $h -- f )
+;     True iff the payload bytes are well-formed UTF-8.  Cheap
+;     predicate.
+proc(string_valid_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r9
+    win64_call(rt_string_valid)
+    mov     TOS, rax
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $validate  ( $h -- )
+;     Throws -2063 if $h is not valid UTF-8, otherwise drops it.
+;     Use to convert "untrusted bytes" into "guaranteed-valid
+;     String" at a defensible boundary.
+proc(string_validate_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, r9
+    win64_call(rt_string_valid)
+    test    rax, rax
+    jz      .invalid
+    ; Drop $h.
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+.invalid:
+    mov     TOS, -2063
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; char$  ( codepoint -- $ )
+;     Single-codepoint String.  ASCII codepoints (< 128) yield a
+;     1-byte payload; larger codepoints up to 4 bytes per UTF-8.
+;     Surrogates and codepoints > U+10FFFF throw -2063.
+proc(char_to_string_word)
+    mov     rcx, UP
+    mov     rdx, TOS
+    win64_call(rt_char_to_string)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax
+    next()
+.err:
+    mov     TOS, -2063
+    call    throw_word
+    next()
+endp()
+
+
+; $upper  ( $h -- $s )
+;     Unicode-aware uppercase.  Allocates a fresh String; byte
+;     length may differ from input (e.g. ß → "SS").  Throws -2063
+;     on malformed UTF-8.
+proc(string_upper_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_string_upper)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax
+    next()
+.err:
+    mov     TOS, -2063
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $lower  ( $h -- $s )
+proc(string_lower_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    mov     rcx, UP
+    mov     rdx, r9
+    win64_call(rt_string_lower)
+    cmp     rax, -1
+    je      .err
+    mov     TOS, rax
+    next()
+.err:
+    mov     TOS, -2063
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $>f  ( $h -- ) ( F: -- r true | false )
+;     Parse $h as a decimal float.  On success pushes r onto the FP
+;     stack and -1 onto the data stack.  On failure pushes only 0
+;     onto the data stack and leaves the FP stack alone.  Trims
+;     surrounding ASCII whitespace before parsing.
+proc(string_to_float_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Use PAD as the out-bits scratch slot.
+    lea     r10, [UP + user_PAD]
+    mov     rcx, r9
+    mov     rdx, r10
+    win64_call(rt_string_to_float)
+    test    rax, rax
+    jz      .parse_fail
+    ; Success: push the parsed f64 onto FP stack.
+    mov     r11, [UP + user_PAD]                    ; raw bits
+    mov     r10, [UP + user_FSP]
+    sub     r10, cell
+    mov     [UP + user_FSP], r10
+    mov     [r10], r11
+    ; Replace TOS with -1 (true).
+    mov     TOS, -1
+    next()
+.parse_fail:
+    mov     TOS, 0
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; f>$  ( -- $ ) ( F: r -- )
+;     Format the top of the FP stack as a decimal String and push
+;     onto the data stack.  Rust's f64-Display formatting:
+;     shortest-round-trip output (e.g. 1.5, -3.14, 1e-9, inf, NaN).
+proc(float_to_string_word)
+    ; Pop f64 from FP stack into rdx.
+    mov     r10, [UP + user_FSP]
+    mov     rdx, [r10]
+    add     r10, cell
+    mov     [UP + user_FSP], r10
+    mov     rcx, UP
+    pushd_call_or(rt_float_to_string, .err)
+    next()
+.err:
+    mov     TOS, -2059
+    call    throw_word
+    next()
+endp()
+
+
+; sb-append-f  ( sb -- ) ( F: r -- )
+;     Append the formatted-decimal representation of r to the
+;     builder.  Throws -2062 on capacity overflow.
+proc(sb_append_float_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 5                                  ; TAG_BUILDER
+    jne     .wrong
+    ; Pop f64 from FP stack.
+    mov     r10, [UP + user_FSP]
+    mov     rdx, [r10]
+    add     r10, cell
+    mov     [UP + user_FSP], r10
+    mov     rcx, r9                                 ; builder
+    win64_call(rt_sb_append_float)
+    cmp     rax, -1
+    je      .overflow
+    ; Drop sb.
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+.overflow:
+    mov     TOS, -2062
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; $words  ( $h -- $1 $2 ... $n n )
+;     Whitespace-tokenise: split on runs of ASCII whitespace,
+;     drop empty pieces.  `s" foo   bar baz" $words` yields three
+;     tokens.  Same 32-piece cap as $split.
+proc(string_words_word)
+    mov     r9, TOS
+    test    r9, r9
+    jz      .nil
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong
+    ; Auto-step before the loop so piece allocations don't trip
+    ; the fragmentation-retry path mid-tokenise (same hazard as
+    ; $split).
+    mov     r14, r9
+    mov     rcx, UP
+    win64_call(rt_gc_auto_step)
+    ; Call rt_string_words_into(UP, haystack, PAD, 32).
+    mov     rcx, UP
+    mov     rdx, r14
+    lea     r8,  [UP + user_PAD]
+    mov     r9,  32
+    win64_call(rt_string_words_into)
+    cmp     rax, -1
+    je      .err
+    ; rax = piece count.  Mirror $split's push-loop.
+    ; Stack effect: ( $h -- $1 $2 ... $n n ).  We consumed $h via
+    ; rcx; the cached TOS is now stale (rax has the count).
+    mov     r14, rax
+    test    r14, r14
+    jnz     .push_first
+    ; Zero pieces: just replace TOS (was $h) with 0.
+    mov     TOS, 0
+    next()
+.push_first:
+    lea     r11, [UP + user_PAD]
+    mov     TOS, [r11]
+    xor     r13, r13
+    inc     r13
+    cmp     r13, r14
+    jge     .push_count
+.push_piece:
+    mov     [DSP - cell], TOS
+    mov     TOS, [r11 + r13 * cell]
+    sub     DSP, cell
+    inc     r13
+    cmp     r13, r14
+    jl      .push_piece
+.push_count:
+    mov     [DSP - cell], TOS
+    mov     TOS, r14
+    sub     DSP, cell
+    next()
+.err:
+    mov     TOS, -2058
+    call    throw_word
+    next()
+.wrong:
+    mov     TOS, -2060
+    call    throw_word
+    next()
+.nil:
+    mov     TOS, -2061
+    call    throw_word
+    next()
+endp()
+
+
+; !$  ( $ handle -- )
+;     Store a managed String pointer into a HEAPPTR slot.
+;     Accepts nil ($ = 0) to allow clearing a slot; otherwise the
+;     value must carry TAG_STRING.  Throws -2060 on a non-String
+;     non-nil value.
+;
+;     This is `!heapptr` with an added type check — the broader
+;     `!heapptr` accepts any tagged value, while `!$` enforces the
+;     "String-typed slot" discipline that lets `@$` skip its own
+;     type check at fetch time.  (We still type-check in @$ today
+;     to defend against direct `!`s; that becomes redundant once
+;     the convention is consistently used.)
+proc(store_string_word)
+    ; Stack: handle in TOS, $ at [DSP].
+    mov     r9, [DSP]                               ; the $ value
+    test    r9, r9
+    jz      .store                                  ; nil is always OK
+    mov     r10, r9
+    and     r10, 7
+    cmp     r10, 4
+    jne     .wrong_type
+.store:
+    mov     qword ptr [TOS], r9                     ; *handle = $
+    ; Drop both args.
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+
+.wrong_type:
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    mov     [DSP - cell], TOS
+    mov     TOS, -2060
+    stk(0, 1)
+    call    throw_word
+    next()
+endp()

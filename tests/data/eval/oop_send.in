@@ -1,0 +1,10 @@
+# requires: (send) (send-xt) self
+create fake-class 16 256 cells + allot
+create obj-a 3 cells allot
+fake-class obj-a !
+42 obj-a 8 + !
+: getx self 8 + @ ;
+' getx fake-class 16 + 5 cells + !
+obj-a 5 (send) .
+obj-a ' getx (send-xt) .
+bye

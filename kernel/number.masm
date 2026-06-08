@@ -1,0 +1,268 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — number output primitives.
+;
+; M2 ships a minimal `.` that prints TOS via the Rust runtime
+; function `rt_print_int`. This is the bypass for the eventual
+; pictured-numeric-output stack (`<# # #s sign #> type`) which is a
+; tower of primitives + colon definitions. We'll build that properly
+; at M7 once parsing and dictionary machinery exist; until then,
+; `rt_print_int` keeps `.` working.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; .  ( n -- )
+;     Print TOS in the current BASE, followed by a space, then
+;     drop it.  Honours `decimal` / `hex` / `octal` via the BASE
+;     user-area variable.  The high-level `.` in core.f normally
+;     shadows us via pictured numeric output; this kernel-level
+;     fallback now agrees with it, so headless `wf64` and the
+;     test harness (which skip core.f) format numbers the same
+;     way as the live IDE.
+proc(dot)
+    mov     rcx, TOS                      ; Win64 arg1 = value to print
+    mov     rdx, [UP + user_BASE]         ; Win64 arg2 = base
+    win64_call(rt_print_int)              ; clobbers RAX
+    mov     TOS, [DSP]                    ; pop: raise NOS into TOS
+    stk(1, 0)                             ; pop: raise stack pointer (add rbp, 8)
+    next()
+endp()
+
+; .s  ( -- )
+;     Print the current stack without consuming it.
+;     Format for now: "[depth sp=... rp=...] tos nos ... " or "[empty ...]".
+proc(dot_s)
+    mov     r14, TOS              ; save TOS (r14 is callee-saved; r15 is reserved for LP)
+    mov     rcx, r14
+    mov     rdx, DSP
+    mov     r8, [UP + user_SP0]
+    mov     r9, rsp
+    win64_call(rt_dot_s)
+    mov     TOS, r14
+    next()
+endp()
+
+; digit  ( char base -- n flag )
+;     Convert one ASCII digit in the given base. On success: replace
+;     (char base) with (n -1). On failure: leave the original char in
+;     NOS and return 0 as the flag, matching WF32's stack shape.
+proc(digit)
+    mov     ecx, [rbp]
+    sub     ecx, '0'
+    jb      .false
+    cmp     ecx, 9
+    jbe     .maybe_ok
+    sub     ecx, 7
+    cmp     ecx, 10
+    jb      .false
+
+.maybe_ok:
+    cmp     rcx, rax
+    jae     .false
+    mov     [rbp], rcx
+    or      rax, -1
+    next()
+
+.false:
+    xor     rax, rax
+    next()
+endp()
+
+; >number  ( ud1 c-addr1 u1 -- ud2 c-addr2 u2 )
+;     Convert as many digits as possible in the current BASE, updating
+;     the double-cell accumulator and returning the unconsumed tail.
+;     Stack layout follows WF32 / the harness double-cell convention:
+;     bottom-first = low high addr len, so [DSP+2*cell] is the low
+;     half and [DSP+cell] is the high half.
+proc(to_number)
+    test    rax, rax
+    je      .done
+    mov     rcx, rax                        ; remaining len
+    mov     rsi, [rbp]                      ; current addr
+    mov     rdi, [UP + user_BASE]           ; numeric base
+
+.loop:
+    movzx   eax, byte ptr [rsi]
+    cmp     eax, '0'
+    jb      .stop
+    cmp     eax, '9'
+    jbe     .deascii
+    and     eax, 0xdf
+    cmp     eax, 'A'
+    jb      .stop
+    sub     eax, 7
+
+.deascii:
+    sub     eax, '0'
+    cmp     rax, rdi
+    jae     .stop
+
+    mov     rdx, rax
+    mov     rax, [rbp + cell]              ; high half
+    mov     [rbp + cell], rdx              ; scratch digit slot
+    mul     rdi
+    mov     rdx, rax
+    mov     rax, [rbp + 2*cell]            ; low half
+    mov     [rbp + 2*cell], rdx            ; scratch high*base low half
+    mul     rdi
+    add     rax, [rbp + cell]              ; + digit
+    adc     rdx, [rbp + 2*cell]            ; + carry + prior high contribution
+    mov     [rbp + 2*cell], rax            ; low
+    mov     [rbp + cell], rdx              ; high
+    add     rsi, 1
+    sub     rcx, 1
+    jnz     .loop
+
+.stop:
+    mov     rax, rcx
+    mov     [rbp], rsi
+.done:
+    next()                                 ; 4 in, 4 out — balanced
+endp()
+
+; number?  ( c-addr u -- n -1 | c-addr u 0 )
+;     Try to parse the bytes at c-addr as a signed integer in BASE.
+;     On success: replace (c-addr u) with (n -1).
+;     On failure: leave (c-addr u) and push 0.
+;
+;     Mirrors find_name's "preserve on failure" convention so quit's
+;     dispatch loop can chain them: find-name → not found → number?
+;     → not number → error.
+proc(number_q)
+    mov     r10, [DSP]                       ; original c-addr
+    mov     r11, TOS                         ; original u
+    mov     rcx, r11                         ; working len
+    mov     rsi, r10                         ; working addr
+    test    rcx, rcx
+    jz      .invalid                         ; empty string is not a number
+
+    xor     r8, r8                           ; accumulator
+    xor     r9, r9                           ; sign flag (0 = positive)
+    mov     rdi, [UP + user_BASE]            ; numeric base
+
+    ; Optional leading minus.
+    movzx   rax, byte ptr [rsi]
+    cmp     al, '-'
+    jne     .check_dollar
+    mov     r9, 1
+    add     rsi, 1
+    sub     rcx, 1
+    ; "-" by itself is not a number.
+    jz      .invalid
+
+    ; Optional $ prefix (forces hex base, may follow -).
+.check_dollar:
+    movzx   rax, byte ptr [rsi]
+    cmp     al, '$'
+    jne     .check_0x
+    mov     rdi, 16             ; force hex for this literal
+    add     rsi, 1
+    sub     rcx, 1
+    jz      .invalid            ; "$" or "-$" alone is not a number
+    jmp     .digits
+
+    ; Optional 0x / 0X prefix (forces hex base, may follow -).
+    ; C-family convention alongside the Forth `$` prefix above.
+.check_0x:
+    cmp     rcx, 2              ; need at least two chars for "0x..."
+    jb      .digits
+    cmp     al, '0'             ; al still holds the first byte
+    jne     .digits
+    movzx   rdx, byte ptr [rsi + 1]
+    or      dl, 0x20            ; fold 'X' (0x58) -> 'x' (0x78)
+    cmp     dl, 'x'
+    jne     .digits
+    mov     rdi, 16             ; force hex
+    add     rsi, 2
+    sub     rcx, 2
+    jz      .invalid            ; "0x" or "-0x" alone is not a number
+
+.digits:
+    test    rcx, rcx
+    jz      .accept_num
+    movzx   rax, byte ptr [rsi]
+    cmp     eax, '0'
+    jb      .invalid
+    cmp     eax, '9'
+    jbe     .deascii
+    and     eax, 0xdf
+    cmp     eax, 'A'
+    jb      .invalid
+    sub     eax, 7
+
+.deascii:
+    sub     eax, '0'
+    cmp     rax, rdi
+    jae     .invalid
+    imul    r8, rdi
+    add     r8, rax
+    add     rsi, 1
+    sub     rcx, 1
+    jmp     .digits
+
+.accept_num:
+    test    r9, r9
+    jz      .positive
+    neg     r8
+.positive:
+    ; Replace (c-addr u) with (n -1).
+    mov     [DSP], r8                        ; NOS slot ← n
+    mov     TOS, -1                          ; TOS ← true flag
+    next()                                   ; 2 in, 2 out — balanced
+
+.invalid:
+    ; Preserve (c-addr u); push 0 on top.
+    mov     [DSP - cell], r11                ; spill original u to new NOS slot
+    xor     TOS, TOS                         ; TOS ← 0 flag
+    stk(2, 3)                                ; emit `sub rbp, 8`
+    next()
+endp()
+
+; base@  ( -- base )    fetch the current numeric base.
+proc(base_fetch)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_BASE]
+    stk(0, 1)
+    next()
+endp()
+
+; base  ( -- addr )    return the address of the current numeric base.
+proc(base_word)
+    mov     [DSP - cell], TOS
+    lea     TOS, [UP + user_BASE]
+    stk(0, 1)
+    next()
+endp()
+
+; base!  ( base -- )    store the current numeric base.
+proc(base_store)
+    mov     [UP + user_BASE], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; decimal  ( -- )    set BASE to 10.
+proc(decimal_word)
+    mov     qword ptr [UP + user_BASE], 10
+    next()
+endp()
+
+; hex  ( -- )    set BASE to 16.
+proc(hex_word)
+    mov     qword ptr [UP + user_BASE], 16
+    next()
+endp()
+
+; octal  ( -- )    set BASE to 8.
+proc(octal_word)
+    mov     qword ptr [UP + user_BASE], 8
+    next()
+endp()

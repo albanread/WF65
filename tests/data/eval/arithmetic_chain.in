@@ -1,0 +1,8 @@
+# requires: - negate abs 1+ 2/
+: diff - ;
+7 3 diff .
+10 negate .
+-5 abs .
+9 1+ .
+100 2/ .
+bye

@@ -1,0 +1,376 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — source-text parsing.
+;
+; Reads SOURCE-ADDR/SOURCE-LEN/>IN from the user area to walk through
+; the current source buffer. `accept` is the line reader (Win32
+; ReadConsoleA via GetStdHandle); `parse_name` extracts one
+; whitespace-delimited token.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; parse-name  ( -- c-addr u )
+;     Skip leading whitespace in source, then return (start, length)
+;     of the next whitespace-terminated token. If source is exhausted,
+;     returns (anywhere, 0).
+;
+;     Treats space (0x20), tab (0x09), LF (0x0A), CR (0x0D) as whitespace.
+;     `\` starts a line comment only when it is the standalone Forth
+;     word `\`, i.e. when the next character is a delimiter or EOF.
+;     `(` starts a parenthesized comment only when it is the standalone
+;     Forth word `(`, i.e. when the next character is a delimiter or EOF.
+;     Names like `(comp-cons)` are ordinary tokens, not comments.
+proc(parse_name)
+    mov     rsi, [UP + user_SOURCE_ADDR]    ; source base
+    mov     rcx, [UP + user_SOURCE_LEN]     ; total length
+    mov     rdx, [UP + user_TO_IN]          ; current offset
+
+    ; --- skip leading whitespace ---
+.skip:
+    cmp     rdx, rcx
+    jae     .empty
+    movzx   r8, byte ptr [rsi + rdx]
+    cmp     r8b, ' '
+    je      .ws
+    cmp     r8b, 9
+    je      .ws
+    cmp     r8b, 10
+    je      .ws
+    cmp     r8b, 13
+    je      .ws
+    cmp     r8b, '\\'
+    je      .maybe_line_comment
+    cmp     r8b, '('
+    je      .maybe_paren_comment
+    jmp     .scan_start
+.ws:
+    inc     rdx
+    jmp     .skip
+
+.maybe_line_comment:
+    lea     r9, [rdx + 1]
+    cmp     r9, rcx
+    jae     .line_comment
+    movzx   r8, byte ptr [rsi + r9]
+    cmp     r8b, ' '
+    je      .line_comment
+    cmp     r8b, 9
+    je      .line_comment
+    cmp     r8b, 10
+    je      .line_comment
+    cmp     r8b, 13
+    je      .line_comment
+    jmp     .scan_start
+
+.line_comment:
+    inc     rdx
+.line_comment_scan:
+    cmp     rdx, rcx
+    jae     .empty
+    movzx   r8, byte ptr [rsi + rdx]
+    cmp     r8b, 10
+    je      .skip
+    cmp     r8b, 13
+    je      .skip
+    inc     rdx
+    jmp     .line_comment_scan
+
+.maybe_paren_comment:
+    lea     r9, [rdx + 1]
+    cmp     r9, rcx
+    jae     .paren_comment
+    movzx   r8, byte ptr [rsi + r9]
+    cmp     r8b, ' '
+    je      .paren_comment
+    cmp     r8b, 9
+    je      .paren_comment
+    cmp     r8b, 10
+    je      .paren_comment
+    cmp     r8b, 13
+    je      .paren_comment
+    jmp     .scan_start
+
+.paren_comment:
+    inc     rdx
+.paren_comment_scan:
+    cmp     rdx, rcx
+    jae     .empty
+    movzx   r8, byte ptr [rsi + rdx]
+    inc     rdx
+    cmp     r8b, ')'
+    je      .skip
+    jmp     .paren_comment_scan
+
+    ; --- scan token until whitespace or end ---
+.scan_start:
+    mov     r9, rdx                          ; r9 = token start offset
+.scan:
+    cmp     rdx, rcx
+    jae     .done
+    movzx   r8, byte ptr [rsi + rdx]
+    cmp     r8b, ' '
+    je      .done
+    cmp     r8b, 9
+    je      .done
+    cmp     r8b, 10
+    je      .done
+    cmp     r8b, 13
+    je      .done
+    inc     rdx
+    jmp     .scan
+
+.done:
+    ; Update >IN to one past the token end.
+    mov     [UP + user_TO_IN], rdx
+    ; Push ( -- c-addr length ).
+    ;
+    ; Slot layout: after `sub rbp, 16`, [new_rbp] is the new NOS and
+    ; [new_rbp + 8] is the new NNOS. So writing BEFORE the sub:
+    ;   [rbp - 16] → new NOS slot       ← c-addr
+    ;   [rbp -  8] → new NNOS slot      ← old TOS (preserve)
+    mov     [DSP - cell], TOS                ; old TOS → NNOS slot
+    lea     rcx, [rsi + r9]
+    mov     [DSP - 2*cell], rcx              ; c-addr → NOS slot
+    mov     TOS, rdx
+    sub     TOS, r9                          ; TOS ← length
+    stk(0, 2)                                ; emit `sub rbp, 16`
+    next()
+
+.empty:
+    ; Source exhausted: push ( -- 0 0 ).
+    mov     [UP + user_TO_IN], rcx
+    mov     [DSP - cell], TOS                ; old TOS → NNOS slot
+    mov     qword ptr [DSP - 2*cell], 0      ; 0 → NOS slot
+    xor     TOS, TOS                         ; TOS = 0
+    stk(0, 2)
+    next()
+endp()
+
+; source  ( -- c-addr u )
+;     Return the current input buffer descriptor.
+proc(source_word)
+    mov     [DSP - cell], TOS
+    mov     rcx, [UP + user_SOURCE_ADDR]
+    mov     [DSP - 2*cell], rcx
+    mov     TOS, [UP + user_SOURCE_LEN]
+    stk(0, 2)
+    next()
+endp()
+
+; state  ( -- a-addr )
+;     Return the address of the compilation-state flag.
+proc(state_word)
+    mov     [DSP - cell], TOS
+    lea     TOS, [UP + user_STATE]
+    stk(0, 1)
+    next()
+endp()
+
+; >in  ( -- a-addr )
+;     Return the address of the parse-area offset.
+proc(to_in_word)
+    mov     [DSP - cell], TOS
+    lea     TOS, [UP + user_TO_IN]
+    stk(0, 1)
+    next()
+endp()
+
+; source-id  ( -- 0 | -1 )
+;     Identify the current input source.
+proc(source_id_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_SOURCE_ID]
+    stk(0, 1)
+    next()
+endp()
+
+; refill  ( -- flag )
+;     Refill the current input buffer. For EVALUATE strings this is a
+;     defined false result with no state change.
+proc(refill_word)
+    cmp     qword ptr [UP + user_SOURCE_ID], -1
+    je      .false
+
+    mov     [DSP - cell], TOS                ; old TOS -> NNNOS slot
+    lea     rcx, [UP + user_SOURCE_BUF]
+    mov     [DSP - 2*cell], rcx              ; c-addr -> NNOS slot
+    mov     TOS, source_buf_size             ; +n1
+    sub     DSP, 2*cell
+    call    accept
+
+    cmp     TOS, -1
+    je      .eof
+
+    mov     [UP + user_SOURCE_LEN], TOS
+    lea     rcx, [UP + user_SOURCE_BUF]
+    mov     [UP + user_SOURCE_ADDR], rcx
+    mov     qword ptr [UP + user_TO_IN], 0
+    mov     TOS, -1
+    next()
+
+.eof:
+    xor     TOS, TOS
+    next()
+
+.false:
+    mov     [DSP - cell], TOS
+    xor     TOS, TOS
+    stk(0, 1)
+    next()
+endp()
+
+; pad  ( -- c-addr )
+;     Return the programmer scratch area.
+proc(pad_word)
+    mov     [DSP - cell], TOS
+    lea     TOS, [UP + user_PAD]
+    stk(0, 1)
+    next()
+endp()
+
+; parse  ( char -- c-addr u )
+;     Parse up to the next delimiter char, or to end of the parse area.
+;     If char is zero, parse the remainder of the current input buffer.
+proc(parse_word)
+    movzx   r8d, al                        ; r8b = delimiter char
+    mov     rsi, [UP + user_SOURCE_ADDR]
+    mov     rcx, [UP + user_SOURCE_LEN]
+    mov     rdx, [UP + user_TO_IN]
+    mov     r9, rdx                        ; r9 = start offset
+
+    test    r8b, r8b
+    jz      .scan_to_end
+
+.scan:
+    cmp     rdx, rcx
+    jae     .at_end
+    movzx   r10d, byte ptr [rsi + rdx]
+    cmp     r10b, r8b
+    je      .found
+    inc     rdx
+    jmp     .scan
+
+.found:
+    lea     r11, [rsi + r9]
+    mov     [DSP - cell], r11
+    mov     r10, rdx
+    sub     r10, r9
+    inc     rdx                            ; consume delimiter
+    mov     [UP + user_TO_IN], rdx
+    mov     TOS, r10
+    stk(1, 2)
+    next()
+
+.scan_to_end:
+    mov     rdx, rcx
+
+.at_end:
+    lea     r11, [rsi + r9]
+    mov     [DSP - cell], r11
+    mov     r10, rdx
+    sub     r10, r9
+    mov     [UP + user_TO_IN], rdx
+    mov     TOS, r10
+    stk(1, 2)
+    next()
+endp()
+
+; word  ( char -- c-addr )
+;     Skip leading delimiters, parse a token delimited by char, and
+;     copy it into a transient counted-string buffer.
+proc(word_word)
+    movzx   r8d, al                        ; r8b = delimiter char
+    mov     rsi, [UP + user_SOURCE_ADDR]
+    mov     rcx, [UP + user_SOURCE_LEN]
+    mov     rdx, [UP + user_TO_IN]
+
+    test    r8b, r8b
+    jz      .scan_start
+
+.skip:
+    cmp     rdx, rcx
+    jae     .scan_start
+    movzx   r10d, byte ptr [rsi + rdx]
+    cmp     r10b, r8b
+    jne     .scan_start
+    inc     rdx
+    jmp     .skip
+
+.scan_start:
+    mov     r9, rdx                        ; r9 = token start
+    test    r8b, r8b
+    jz      .copy_at_end
+
+.scan:
+    cmp     rdx, rcx
+    jae     .copy_at_end
+    movzx   r10d, byte ptr [rsi + rdx]
+    cmp     r10b, r8b
+    je      .copy_found
+    inc     rdx
+    jmp     .scan
+
+.copy_found:
+    mov     [UP + user_TO_IN], rdx
+    inc     qword ptr [UP + user_TO_IN]    ; consume delimiter
+    jmp     .copy_out
+
+.copy_at_end:
+    mov     [UP + user_TO_IN], rdx
+
+.copy_out:
+    mov     r10, rdx
+    sub     r10, r9                        ; parsed length
+    cmp     r10, 255
+    jbe     .len_ok
+    mov     r10, 255
+
+.len_ok:
+    lea     r11, [UP + user_WORD_BUF]
+    mov     byte ptr [r11], r10b
+    lea     rdi, [r11 + 1]
+    lea     r13, [rsi + r9]
+    xor     r12, r12
+.copy_loop:
+    cmp     r12, r10
+    jae     .copied
+    mov     al, byte ptr [r13 + r12]
+    mov     byte ptr [rdi + r12], al
+    inc     r12
+    jmp     .copy_loop
+
+.copied:
+    mov     byte ptr [rdi + r10], 0
+    lea     TOS, [UP + user_WORD_BUF]
+    next()
+endp()
+
+
+; accept  ( c-addr +n1 -- +n2 )
+;     Read one line of input into c-addr (at most n1 bytes, terminator
+;     not included). Return the byte count. EOF returns 0.
+;
+;     Delegates to the Rust runtime function `rt_read_line` which
+;     handles two backings transparently:
+;       * Buffered (tests) — reads from an in-memory input vector,
+;         line by line.
+;       * Live (interactive REPL) — reads from stdin via Rust's
+;         line-buffered BufRead, which works equally well on consoles
+;         and on redirected stdin.
+;     LF and CRLF are both stripped before the count is returned.
+proc(accept)
+    ; Win64 args: rcx = buffer addr, rdx = capacity.
+    mov     rcx, [DSP]               ; arg1 = c-addr (NOS)
+    mov     rdx, TOS                 ; arg2 = +n1
+    win64_call(rt_read_line)
+    ; rax = bytes written. ( c-addr +n1 -- +n2 ).
+    stk(2, 1)
+    next()
+endp()

@@ -1,0 +1,4 @@
+# requires: begin until
+: countdown  BEGIN DUP . 1- DUP 0= UNTIL DROP ;
+5 countdown
+bye

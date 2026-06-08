@@ -1,0 +1,6 @@
+class thing :m greet 42 ;m end-class
+thing new x
+x -> greet .
+: try-frob x -> frob ;
+' try-frob catch .
+bye

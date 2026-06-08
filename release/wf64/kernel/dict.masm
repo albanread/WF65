@@ -1,0 +1,956 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — dictionary lookup & header construction.
+;
+; Header layout is defined in macros.masm (dh_link/dh_ct/dh_xtptr/
+; dh_comp/.../dh_nt) and is read/written *only* by the primitives in
+; this file (plus `find_name` and the interpreter dispatcher).
+; The Rust driver does NOT know the header layout; it bootstraps the
+; dictionary by calling `(create)` once per primitive followed by
+; `(set-xt)` and optionally `(set-flags)`.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+proc(init_dictionary_overlay)
+    mov     r8, [UP + user_DICT_END]
+    mov     [UP + user_INDEX_HERE], r8
+    mov     qword ptr [UP + user_INDEX_LATEST], 0
+    mov     qword ptr [UP + user_ORDER_COUNT], 0
+
+    mov     r8, [UP + user_INDEX_HERE]
+    sub     r8, wl_size
+    cmp     r8, [UP + user_HERE]
+    jbe     .overflow
+    mov     [UP + user_INDEX_HERE], r8
+
+    xor     r9, r9
+.clear:
+    cmp     r9, wl_bucket_count
+    jae     .cleared
+    mov     qword ptr [r8 + r9*8], 0
+    inc     r9
+    jmp     .clear
+
+.cleared:
+    mov     [UP + user_FORTH_WID], r8
+    mov     [UP + user_CURRENT], r8
+    mov     qword ptr [UP + user_ORDER_COUNT], 1
+    mov     [UP + user_CONTEXT], r8
+    ret
+
+.overflow:
+    mov     TOS, -8
+    call    throw_word
+    ret
+endp()
+
+proc(search_header_in_wordlist)
+    mov     r10, rcx                        ; len
+    test    r10, r10
+    jz      .not_found
+    cmp     r10, 32
+    ja      .not_found
+
+    mov     eax, 2166136261
+    xor     edx, edx                        ; first folded char
+    xor     r8, r8
+.hash:
+    cmp     r8, r10
+    jae     .hashed
+    movzx   r9d, byte ptr [rsi + r8]
+    cmp     r9d, 'a'
+    jb      .folded
+    cmp     r9d, 'z'
+    ja      .folded
+    sub     r9d, 32
+.folded:
+    test    r8, r8
+    jne     .mix
+    mov     edx, r9d
+.mix:
+    xor     eax, r9d
+    imul    eax, eax, 16777619
+    inc     r8
+    jmp     .hash
+
+.hashed:
+    mov     r11d, eax                       ; full hash
+    and     eax, wl_bucket_mask
+    lea     r9, [rdi + rax*8]
+    mov     r8, [r9]
+
+.scan:
+    test    r8, r8
+    jz      .not_found
+    cmp     dword ptr [r8 + dn_hash], r11d
+    jne     .next
+    cmp     byte ptr [r8 + dn_len], r10b
+    jne     .next
+    cmp     byte ptr [r8 + dn_first], dl
+    jne     .next
+
+    mov     rdi, [r8 + dn_header]
+    lea     r9, [rdi + dh_name]
+    xor     r11, r11
+.cmpbyte:
+    cmp     r11, r10
+    je      .matched
+    movzx   ecx, byte ptr [rsi + r11]
+    cmp     ecx, 'a'
+    jb      .qfolded
+    cmp     ecx, 'z'
+    ja      .qfolded
+    sub     ecx, 32
+.qfolded:
+    movzx   eax, byte ptr [r9 + r11]
+    cmp     eax, 'a'
+    jb      .hfolded
+    cmp     eax, 'z'
+    ja      .hfolded
+    sub     eax, 32
+.hfolded:
+    cmp     ecx, eax
+    jne     .next
+    inc     r11
+    jmp     .cmpbyte
+
+.matched:
+    mov     rax, rdi
+    ret
+
+.next:
+    mov     r8, [r8 + dn_bucket_next]
+    jmp     .scan
+
+.not_found:
+    xor     rax, rax
+    ret
+endp()
+
+; search_header_in_order
+;     Walk CONTEXT[0..ORDER_COUNT], calling search_header_in_wordlist
+;     for each wid until one returns non-null.
+;
+;     **Win64 ABI trap**: r8 and r9 are caller-saved. The earlier
+;     version held the loop count in r8 and the loop index in r9
+;     across the call — both got clobbered by search_header_in_wordlist
+;     (which uses r8/r9 heavily for its hash walk). After the call
+;     `cmp r9, r8` then compared garbage to garbage, frequently
+;     exiting after the FIRST wordlist instead of falling through to
+;     the rest of the search order. This was the root cause of "bye
+;     is unfindable after `forth-wordlist wordlist 2 set-order`":
+;     CONTEXT[0] (the new empty wid) was searched correctly, then
+;     CONTEXT[1] (forth_wid) was skipped.
+;
+;     Fixed by spilling the loop counter to the local stack frame
+;     and re-loading ORDER_COUNT from the user area on each iteration.
+proc(search_header_in_order)
+    sub     rsp, 24
+    mov     [rsp],      rsi         ; query addr
+    mov     [rsp + 8],  rcx         ; query len
+    mov     qword ptr [rsp + 16], 0  ; loop counter
+.loop:
+    mov     r9, [rsp + 16]
+    mov     r8, [UP + user_ORDER_COUNT]
+    cmp     r9, r8
+    jae     .not_found
+    mov     rsi, [rsp]
+    mov     rcx, [rsp + 8]
+    mov     rdi, [UP + user_CONTEXT + r9*8]
+    call    search_header_in_wordlist
+    test    rax, rax
+    jnz     .found
+    mov     r9, [rsp + 16]
+    inc     r9
+    mov     [rsp + 16], r9
+    jmp     .loop
+
+.found:
+    add     rsp, 24
+    ret
+
+.not_found:
+    add     rsp, 24
+    xor     rax, rax
+    ret
+endp()
+
+proc(publish_header_overlay)
+    mov     r10, rcx                        ; len
+    mov     r8, [UP + user_CURRENT]         ; wid
+    mov     eax, 2166136261
+    xor     edx, edx                        ; first folded char
+    xor     r9, r9
+.hash:
+    cmp     r9, r10
+    jae     .hashed
+    movzx   ecx, byte ptr [rsi + r9]
+    cmp     ecx, 'a'
+    jb      .folded
+    cmp     ecx, 'z'
+    ja      .folded
+    sub     ecx, 32
+.folded:
+    test    r9, r9
+    jne     .mix
+    mov     edx, ecx
+.mix:
+    xor     eax, ecx
+    imul    eax, eax, 16777619
+    inc     r9
+    jmp     .hash
+
+.hashed:
+    mov     r11d, eax
+    mov     r9, [UP + user_INDEX_HERE]
+    sub     r9, dn_size
+    cmp     r9, [UP + user_HERE]
+    jbe     .overflow
+    mov     [UP + user_INDEX_HERE], r9
+
+    mov     [r9 + dn_header], rdi
+    mov     [r9 + dn_wid], r8
+    mov     dword ptr [r9 + dn_hash], r11d
+    mov     byte ptr [r9 + dn_len], r10b
+    mov     byte ptr [r9 + dn_first], dl
+    mov     rcx, [UP + user_INDEX_LATEST]
+    mov     [r9 + dn_global_prev], rcx
+
+    mov     eax, r11d
+    and     eax, wl_bucket_mask
+    lea     rcx, [r8 + rax*8]
+    mov     rax, [rcx]
+    mov     [r9 + dn_bucket_next], rax
+    mov     [rcx], r9
+    mov     [UP + user_INDEX_LATEST], r9
+    ret
+
+.overflow:
+    mov     TOS, -8
+    call    throw_word
+    ret
+endp()
+
+; find-name  ( c-addr u -- nt -1 | c-addr u 0 )
+;     Look up a name in the current search order. On match: replace
+;     (c-addr u) with (nt -1), where nt points at the counted name
+;     token byte. On miss: leave (c-addr u) intact and push 0,
+;     preserving the name for number?.
+proc(find_name)
+    sub     rsp, cell
+    mov     [rsp], TOS                       ; preserve original len across helper call
+    mov     rcx, TOS                         ; len
+    mov     rsi, [DSP]                       ; query addr
+    call    search_header_in_order
+    test    rax, rax
+    jz      .not_found
+
+    lea     r8, [rax + dh_nt]
+    add     rsp, cell
+    mov     [DSP], r8
+    mov     TOS, -1
+    next()
+
+.not_found:
+    mov     rcx, [rsp]
+    add     rsp, cell
+    mov     [DSP - cell], rcx
+    xor     TOS, TOS
+    stk(2, 3)
+    next()
+endp()
+
+
+; >ct  ( xt -- ct )
+;     Use the xt-side backoffset cell to recover the address of the
+;     owning header's compilation-token field.
+proc(to_ct)
+    mov     rcx, [TOS - cell]
+    add     TOS, rcx
+    next()
+endp()
+
+
+; >comp  ( xt -- comp )
+;     Convert xt to the header's compile helper slot.
+proc(to_comp)
+    mov     rcx, [TOS - cell]                ; candidate ct offset
+    lea     r8, [TOS + rcx]                  ; candidate ct addr
+    mov     r9, [r8 + dh_xtptr - dh_ct]      ; header.xtptr via ct addr
+    cmp     r9, TOS
+    jne     .scan_fallback
+    lea     TOS, [r8 + dh_comp - dh_ct]
+    next()
+
+.scan_fallback:
+    mov     rdi, [UP + user_LATEST]
+
+.scan:
+    test    rdi, rdi
+    jz      .not_found
+    cmp     TOS, [rdi + dh_xtptr]
+    je      .matched
+    mov     rdi, [rdi + dh_link]
+    jmp     .scan
+
+.matched:
+    lea     TOS, [rdi + dh_comp]
+    next()
+
+.not_found:
+    xor     TOS, TOS
+    next()
+endp()
+
+
+; >name  ( xt -- nt )
+;     Translate an xt to its name token. Primitive xts now carry a
+;     ct-backoffset cell at xt-cell; runtime-created xts still fall
+;     back to a dictionary scan until their xt-side metadata exists.
+proc(to_name)
+    mov     rcx, [TOS - cell]                ; candidate ct offset
+    lea     r8, [TOS + rcx]                  ; candidate ct addr
+    mov     r9, [r8 + dh_xtptr - dh_ct]      ; header.xtptr via ct addr
+    cmp     r9, TOS
+    jne     .scan_fallback
+    lea     TOS, [r8 + dh_nt - dh_ct]
+    next()
+
+.scan_fallback:
+    mov     rdi, [UP + user_LATEST]
+
+.scan:
+    test    rdi, rdi
+    jz      .not_found
+    cmp     TOS, [rdi + dh_xtptr]
+    je      .matched
+    mov     rdi, [rdi + dh_link]
+    jmp     .scan
+
+.matched:
+    lea     TOS, [rdi + dh_nt]
+    next()
+
+.not_found:
+    xor     TOS, TOS
+    next()
+endp()
+
+
+; link>name  ( lfa -- nt )
+;     Convert a header-link address/header base to the counted name.
+proc(link_to_name)
+    add     TOS, dh_nt
+    next()
+endp()
+
+
+; name>interpret  ( nt -- xt )
+;     Fetch the executable xt from a name token.
+proc(name_to_interpret)
+    mov     TOS, [TOS + dh_xtptr - dh_nt]
+    next()
+endp()
+
+
+; name>compile  ( nt -- xt ct )
+;     Fetch the compilation token pair in WF32's stack order so an
+;     immediate EXECUTE of the returned ct consumes xt.
+proc(name_to_compile)
+    lea     rcx, [TOS + dh_ct - dh_nt]
+    mov     rdx, [rcx]                       ; ct
+    mov     r8,  [rcx + cell]                ; xt
+    mov     [DSP - cell], r8                 ; NOS = xt
+    mov     TOS, rdx                         ; TOS = ct
+    stk(1, 2)
+    next()
+endp()
+
+
+; tfa@  ( nt -- type )
+;     Fetch the type flag byte from a name token.
+proc(tfa_fetch)
+    movzx   TOS, byte ptr [TOS + dh_tfa - dh_nt]
+    next()
+endp()
+
+
+; >body  ( xt -- addr | 0 )
+;     CREATE-family words return their body address. Other word kinds
+;     now THROW -31, matching WF32's ">BODY used on non-CREATEd
+;     definition" error.
+proc(to_body)
+    mov     rcx, [TOS - cell]
+    lea     r8, [TOS + rcx]                  ; r8 = ct
+    cmp     byte ptr [r8 + dh_tfa - dh_ct], tfa_tcre
+    jne     .unsupported
+    add     TOS, create_stub_size
+    next()
+
+.unsupported:
+    mov     TOS, -31
+    call    throw_word
+    next()
+endp()
+
+
+; latestxt  ( -- xt )
+;     Xt of the most recently created or updated definition.
+proc(latestxt)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_LATESTXT]
+    stk(0, 1)
+    next()
+endp()
+
+
+; forget_last  ( -- )
+;     Drop the most recently created post-bootstrap word from the
+;     dictionary, rolling back HERE/LATEST/LATESTXT in place.
+;     If there is nothing above the protected bootstrap fence, no-op.
+proc(forget_last_word)
+    mov     rdi, [UP + user_LATEST]
+    mov     r8, [UP + user_FORGET_FENCE]
+    test    rdi, rdi
+    jz      .done
+    cmp     rdi, r8
+    jbe     .done
+
+    ; ── V1c: HEAPPTR rewind ────────────────────────────────────────
+    ; If the word about to be forgotten was defined by HEAPPTR, we
+    ; need to zero its slot and roll HEAPPTR_NEXT back by one cell —
+    ; otherwise the slot stays in the GC root region holding a stale
+    ; tagged pointer, leaking whatever vector it bound.
+    ;
+    ; Detection: tfa == tfa_tcre AND the stub's imm64 (at xt+6) is
+    ; in [user_HEAPPTR_BASE_abs, user_HEAPPTR_NEXT).  CREATE-flavoured
+    ; words with bodies outside that range are ordinary CREATE words
+    ; and we leave them alone.  Uses r12 and r13 which are callee-
+    ; saved (preserved by forth_main's prologue) and not touched by
+    ; the rest of this proc.
+    cmp     byte ptr [rdi + dh_tfa], tfa_tcre
+    jne     .not_heapptr
+    mov     r12, [rdi + dh_xtptr]                   ; xt
+    mov     r12, [r12 + 6]                          ; imm64 from stub = slot addr
+    lea     r13, [UP + user_HEAPPTR_BASE]
+    cmp     r12, r13
+    jb      .not_heapptr
+    mov     r13, [UP + user_HEAPPTR_NEXT]
+    cmp     r12, r13
+    jae     .not_heapptr
+    ; This is a HEAPPTR word.  Zero its slot, decrement NEXT by cell.
+    ; LIFO invariant: the slot we're about to drop is exactly
+    ; (NEXT - cell); we don't have to find it, just trust that.
+    mov     qword ptr [r12], 0
+    sub     qword ptr [UP + user_HEAPPTR_NEXT], cell
+
+.not_heapptr:
+    mov     r8, [UP + user_INDEX_LATEST]
+    test    r8, r8
+    jz      .remove_header_only
+    mov     r9, [r8 + dn_wid]
+    mov     eax, dword ptr [r8 + dn_hash]
+    and     eax, wl_bucket_mask
+    lea     rcx, [r9 + rax*8]
+    mov     r10, [rcx]
+    cmp     r10, r8
+    jne     .scan_bucket
+    mov     r10, [r8 + dn_bucket_next]
+    mov     [rcx], r10
+    jmp     .drop_index_latest
+
+.scan_bucket:
+    test    r10, r10
+    jz      .drop_index_latest
+    mov     r11, [r10 + dn_bucket_next]
+    cmp     r11, r8
+    je      .unlink_bucket
+    mov     r10, r11
+    jmp     .scan_bucket
+
+.unlink_bucket:
+    mov     r11, [r8 + dn_bucket_next]
+    mov     [r10 + dn_bucket_next], r11
+
+.drop_index_latest:
+    mov     r10, [r8 + dn_global_prev]
+    mov     [UP + user_INDEX_LATEST], r10
+    cmp     r8, [UP + user_INDEX_HERE]
+    jne     .remove_header_only
+    lea     r10, [r8 + dn_size]
+    mov     [UP + user_INDEX_HERE], r10
+
+.remove_header_only:
+
+    mov     rcx, [rdi + dh_link]
+    mov     [UP + user_HERE], rdi
+    mov     [UP + user_LATEST], rcx
+    test    rcx, rcx
+    jz      .clear_latestxt
+    mov     r8, [rcx + dh_xtptr]
+    mov     [UP + user_LATESTXT], r8
+    next()
+
+.clear_latestxt:
+    mov     qword ptr [UP + user_LATESTXT], 0
+
+.done:
+    next()
+endp()
+
+
+; (create)  ( c-addr u -- )
+;     Allocate a new dictionary header at HERE:
+;       link      = LATEST
+;       ct        = compile,
+;       xtptr     = body start (with one cell reserved at xt-cell for ct-offset)
+;       comp      = compile,
+;       rec/vfa/ofa/stk/tfa = 0
+;       nt        = counted string (u + bytes)
+;     Advance HERE past the header (to where the body will live), and
+;     install the new header as LATEST — so the word becomes
+;     immediately visible to `find_name`.
+;
+;     This is the foundation `:` uses; the bootstrap calls it once per
+;     primitive (the body bytes don't matter for primitives — the
+;     `(set-xt)` that follows overwrites the xt with the JIT-resolved
+;     address).
+proc(create)
+    mov     rcx, TOS                         ; rcx = u
+    mov     rsi, [DSP]                       ; rsi = c-addr
+    mov     rdi, [UP + user_HERE]            ; rdi = header base
+
+    ; link = LATEST
+    mov     r8, [UP + user_LATEST]
+    mov     [rdi + dh_link], r8
+
+    ; Default compilation token mirrors WF32: ct = compile-word semantics,
+    ; comp = the helper that materialises a plain call to xt.
+    lea     r8, [rip + compile_word]
+    mov     [rdi + dh_ct], r8
+    lea     r8, [rip + compile_comma]
+    mov     [rdi + dh_comp], r8
+    mov     qword ptr [rdi + dh_rec], 0
+    mov     word ptr [rdi + dh_vfa], 0
+    mov     word ptr [rdi + dh_ofa], 0
+    mov     word ptr [rdi + dh_stk], 0
+    mov     byte ptr [rdi + dh_tfa], 0
+    mov     byte ptr [rdi + dh_nt], cl
+
+    ; Copy name bytes.
+    lea     r8, [rdi + dh_name]
+    xor     r9, r9
+.copy:
+    cmp     r9, rcx
+    je      .copied
+    mov     dl, byte ptr [rsi + r9]
+    mov     byte ptr [r8 + r9], dl
+    inc     r9
+    jmp     .copy
+
+.copied:
+    ; Reserve one cell immediately before xt for the WF32-style
+    ; ct-backoffset slot. The executable entry remains the first code
+    ; byte after that slot.
+    lea     r10, [rcx + dh_name + 7]
+    and     r10, -8
+    lea     r11, [rdi + r10 + cell]
+    lea     r8,  [rdi + dh_ct]
+    sub     r8, r11
+    mov     [r11 - cell], r8
+    cmp     r11, [UP + user_INDEX_HERE]
+    jae     .overflow
+    sub     rsp, 16
+    mov     [rsp], rdi
+    mov     [rsp + cell], r11
+    call    publish_header_overlay
+    mov     rdi, [rsp]
+    mov     r11, [rsp + cell]
+    add     rsp, 16
+    mov     [rdi + dh_xtptr], r11            ; xt → body start
+    mov     [UP + user_HERE],   r11
+    mov     [UP + user_LATEST], rdi
+    mov     [UP + user_LATESTXT], r11
+
+    ; Drop (c-addr u). Stack at entry: TOS=u, [DSP]=c-addr, [DSP+cell]=old TOS.
+    mov     TOS, [DSP + cell]
+    add     DSP, 2*cell
+    next()
+
+.overflow:
+    mov     TOS, -8
+    call    throw_word
+    next()
+endp()
+
+
+; publish-primitive  ( c-addr u xt comp-xt flags -- )
+;     Kernel-side primitive publisher used by the Rust bootstrap.
+proc(publish_primitive)
+    sub     DSP, 2*cell
+    mov     r9, [DSP + 5*cell]               ; original c-addr
+    mov     [DSP], r9
+    mov     [DSP + cell], TOS                ; keep flags live across create
+    mov     TOS, [DSP + 4*cell]              ; original u
+    call    create
+
+    mov     rdi, [UP + user_LATEST]
+    mov     r8, [DSP + cell]                 ; xt
+    mov     [rdi + dh_xtptr], r8
+    mov     [UP + user_LATESTXT], r8
+    mov     r9, [DSP]                        ; comp-xt
+    test    r9, r9
+    jz      .maybe_flags
+    mov     [rdi + dh_comp], r9
+
+.maybe_flags:
+    test    TOS, TOS                         ; flags restored by create
+    jz      .drop_inputs
+    lea     r9, [rip + execute]
+    mov     [rdi + dh_ct], r9
+
+.drop_inputs:
+    mov     r8, [DSP + 4*cell]
+    add     DSP, 5*cell
+    mov     TOS, r8
+    next()
+endp()
+
+
+; wordlist  ( -- wid )
+proc(wordlist_word)
+    mov     r8, [UP + user_INDEX_HERE]
+    sub     r8, wl_size
+    cmp     r8, [UP + user_HERE]
+    jbe     .overflow
+    mov     [UP + user_INDEX_HERE], r8
+
+    xor     r9, r9
+.clear:
+    cmp     r9, wl_bucket_count
+    jae     .done
+    mov     qword ptr [r8 + r9*8], 0
+    inc     r9
+    jmp     .clear
+
+.done:
+    mov     [DSP - cell], TOS
+    mov     TOS, r8
+    stk(0, 1)
+    next()
+
+.overflow:
+    mov     TOS, -8
+    call    throw_word
+    next()
+endp()
+
+
+; forth-wordlist  ( -- wid )
+proc(forth_wordlist_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_FORTH_WID]
+    stk(0, 1)
+    next()
+endp()
+
+; tools-wordlist  ( -- wid )
+proc(tools_wordlist_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_TOOLS_WID]
+    stk(0, 1)
+    next()
+endp()
+
+; private-wordlist  ( -- wid )
+proc(private_wordlist_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_PRIVATE_WID]
+    stk(0, 1)
+    next()
+endp()
+
+
+; get-current  ( -- wid )
+proc(get_current_word)
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_CURRENT]
+    stk(0, 1)
+    next()
+endp()
+
+
+; set-current  ( wid -- )
+proc(set_current_word)
+    mov     [UP + user_CURRENT], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; definitions  ( -- )
+proc(definitions_word)
+    mov     r8, [UP + user_CONTEXT]
+    mov     [UP + user_CURRENT], r8
+    next()
+endp()
+
+
+; only  ( -- )
+proc(only_word)
+    mov     r8, [UP + user_FORTH_WID]
+    mov     [UP + user_CONTEXT], r8
+    mov     qword ptr [UP + user_ORDER_COUNT], 1
+    next()
+endp()
+
+
+; also  ( -- )
+proc(also_word)
+    mov     rcx, [UP + user_ORDER_COUNT]
+    cmp     rcx, search_order_max
+    jae     .overflow
+    test    rcx, rcx
+    jz      .minimum
+
+    mov     r8, rcx
+.shift:
+    test    r8, r8
+    jz      .shifted
+    mov     r9, [UP + user_CONTEXT + r8*8 - cell]
+    mov     [UP + user_CONTEXT + r8*8], r9
+    dec     r8
+    jmp     .shift
+
+.shifted:
+    inc     rcx
+    mov     [UP + user_ORDER_COUNT], rcx
+    next()
+
+.minimum:
+    mov     r8, [UP + user_FORTH_WID]
+    mov     [UP + user_CONTEXT], r8
+    mov     [UP + user_CONTEXT + cell], r8
+    mov     qword ptr [UP + user_ORDER_COUNT], 2
+    next()
+
+.overflow:
+    mov     TOS, -49
+    call    throw_word
+    next()
+endp()
+
+
+; previous  ( -- )
+proc(previous_word)
+    mov     rcx, [UP + user_ORDER_COUNT]
+    cmp     rcx, 1
+    jbe     .minimum
+
+    xor     r8, r8
+.shift:
+    lea     r9, [r8 + 1]
+    cmp     r9, rcx
+    jae     .shifted
+    mov     r10, [UP + user_CONTEXT + r9*8]
+    mov     [UP + user_CONTEXT + r8*8], r10
+    inc     r8
+    jmp     .shift
+
+.shifted:
+    dec     rcx
+    mov     [UP + user_ORDER_COUNT], rcx
+    next()
+
+.minimum:
+    mov     r8, [UP + user_FORTH_WID]
+    mov     [UP + user_CONTEXT], r8
+    mov     qword ptr [UP + user_ORDER_COUNT], 1
+    next()
+endp()
+
+
+; forth  ( -- )
+proc(forth_word)
+    mov     r8, [UP + user_FORTH_WID]
+    mov     [UP + user_CONTEXT], r8
+    mov     rcx, [UP + user_ORDER_COUNT]
+    test    rcx, rcx
+    jnz     .done
+    mov     qword ptr [UP + user_ORDER_COUNT], 1
+.done:
+    next()
+endp()
+
+
+; get-order  ( -- widn ... wid1 n )
+proc(get_order_word)
+    mov     r8, [UP + user_ORDER_COUNT]
+    mov     rcx, r8
+    test    rcx, rcx
+    jz      .push_count
+
+.push_wids:
+    dec     rcx
+    mov     [DSP - cell], TOS
+    mov     TOS, [UP + user_CONTEXT + rcx*8]
+    sub     DSP, cell
+    test    rcx, rcx
+    jnz     .push_wids
+
+.push_count:
+    mov     [DSP - cell], TOS
+    mov     TOS, r8
+    stk(0, 1)
+    next()
+endp()
+
+
+; set-order  ( widn ... wid1 n -- )
+proc(set_order_word)
+    mov     rcx, TOS                         ; n
+    cmp     rcx, 0
+    jl      .minimum
+    cmp     rcx, search_order_max
+    ja      .overflow
+    mov     [UP + user_ORDER_COUNT], rcx
+    xor     r8, r8
+.copy:
+    cmp     r8, rcx
+    jae     .drop
+    mov     r9, [DSP + r8*8]
+    mov     [UP + user_CONTEXT + r8*8], r9
+    inc     r8
+    jmp     .copy
+
+.drop:
+    lea     r8, [DSP + rcx*8]
+    mov     TOS, [r8]
+    lea     DSP, [r8 + cell]
+    next()
+
+.minimum:
+    mov     r8, [UP + user_FORTH_WID]
+    mov     [UP + user_CONTEXT], r8
+    mov     qword ptr [UP + user_ORDER_COUNT], 1
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+
+.overflow:
+    mov     TOS, -49
+    call    throw_word
+    next()
+endp()
+
+
+; search-wordlist  ( c-addr u wid -- 0 | xt 1 | xt -1 )
+proc(search_wordlist_word)
+    mov     rdi, TOS                         ; wid
+    mov     rcx, [DSP]                       ; len
+    mov     rsi, [DSP + cell]                ; c-addr
+    call    search_header_in_wordlist
+    test    rax, rax
+    jz      .not_found
+
+    mov     r8, [rax + dh_xtptr]
+    lea     r9, [rip + execute]
+    cmp     [rax + dh_ct], r9
+    jne     .ordinary
+    mov     r9, 1
+    jmp     .return_found
+
+.ordinary:
+    mov     r9, -1
+
+.return_found:
+    mov     [DSP + cell], r8
+    add     DSP, cell
+    mov     TOS, r9
+    next()
+
+.not_found:
+    add     DSP, 2*cell
+    xor     TOS, TOS
+    next()
+endp()
+
+
+; (set-xt)  ( xt -- )
+;     Overwrite LATEST's xt slot with the given value. Used by the
+;     bootstrap to point each primitive header at its JIT-resolved
+;     code address (instead of the empty body location `(create)`
+;     defaulted to).
+proc(set_xt)
+    mov     rdi, [UP + user_LATEST]
+    mov     [rdi + dh_xtptr], TOS
+    mov     [UP + user_LATESTXT], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; (set-comp)  ( xt -- )
+;     Bootstrap helper: overwrite LATEST's comp slot with the given helper.
+proc(set_comp)
+    mov     rdi, [UP + user_LATEST]
+    mov     [rdi + dh_comp], TOS
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; (set-flags)  ( n -- )
+;     Bootstrap helper retained for the current Rust-side registry.
+;     Non-zero means IMMEDIATE, so flip HEAD.CT to EXECUTE; zero
+;     restores the normal compile-time token. TFA is now reserved for
+;     actual WF32-style type tags and is not modified here.
+proc(set_flags)
+    mov     rdi, [UP + user_LATEST]
+    lea     r8, [rip + compile_word]
+    test    TOS, TOS
+    jz      .store_ct
+    lea     r8, [rip + execute]
+.store_ct:
+    mov     [rdi + dh_ct], r8
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; largest  ( addr count -- max-addr max )
+;     Scan `count` cells starting at `addr`, returning the address of
+;     the largest cell and its value. Faithful port of WF32's helper
+;     used while iterating vocabulary thread arrays.
+proc(largest)
+    mov     rcx, rax                        ; rcx = count
+    mov     rax, [rbp]                      ; rax = current addr
+    xor     rdi, rdi                        ; best value = 0
+    mov     rdx, rax                        ; best addr = start
+
+.loop:
+    cmp     [rax], rdi
+    jle     .next
+    mov     rdx, rax
+    mov     rdi, [rax]
+
+.next:
+    add     rax, cell
+    sub     rcx, 1
+    jnz     .loop
+
+    mov     [rbp], rdx                      ; NOS = best addr
+    mov     rax, rdi                        ; TOS = best value
+    next()
+endp()

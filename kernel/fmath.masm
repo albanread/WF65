@@ -1,0 +1,78 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — floating-point math primitives via msvcrt.
+;
+; All Win64 math functions take/return a double in XMM0; binary ops
+; take a second double in XMM1.  The macros below shuttle values
+; between WF64's separate FP stack (at [UP + user_FSP]) and the XMM
+; registers before/after the call.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+@extern "msvcrt.dll" sqrt(1)
+@extern "msvcrt.dll" sin(1)
+@extern "msvcrt.dll" cos(1)
+@extern "msvcrt.dll" tan(1)
+@extern "msvcrt.dll" exp(1)
+@extern "msvcrt.dll" log(1)
+@extern "msvcrt.dll" log10(1)
+@extern "msvcrt.dll" atan(1)
+@extern "msvcrt.dll" asin(1)
+@extern "msvcrt.dll" acos(1)
+@extern "msvcrt.dll" pow(2)
+@extern "msvcrt.dll" atan2(2)
+
+; Unary math wrapper. Loads top FP into XMM0, calls target, stores
+; XMM0 back at the same slot.
+@macro fp_call1(target)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 32
+    call    &target
+    mov     rsp, r12
+    mov     rcx, [UP + user_FSP]
+    movsd   qword ptr [rcx], xmm0
+@endmacro
+
+; Binary math wrapper. FP stack: NOS=r1, TOS=r2. After: stack top = result, one slot popped.
+@macro fp_call2(target)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm1, qword ptr [rcx]
+    movsd   xmm0, qword ptr [rcx + cell]
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 32
+    call    &target
+    mov     rsp, r12
+    mov     rcx, [UP + user_FSP]
+    add     rcx, cell
+    movsd   qword ptr [rcx], xmm0
+    mov     [UP + user_FSP], rcx
+@endmacro
+
+; ── Unary math primitives ────────────────────────────────────────────
+
+proc(fsqrt_word)  fp_call1(sqrt)   next()  endp()
+proc(fsin_word)   fp_call1(sin)    next()  endp()
+proc(fcos_word)   fp_call1(cos)    next()  endp()
+proc(ftan_word)   fp_call1(tan)    next()  endp()
+proc(fexp_word)   fp_call1(exp)    next()  endp()
+proc(fln_word)    fp_call1(log)    next()  endp()
+proc(flog_word)   fp_call1(log10)  next()  endp()
+proc(fatan_word)  fp_call1(atan)   next()  endp()
+proc(fasin_word)  fp_call1(asin)   next()  endp()
+proc(facos_word)  fp_call1(acos)   next()  endp()
+
+; ── Binary math primitives ───────────────────────────────────────────
+
+proc(f_pow_word)  fp_call2(pow)    next()  endp()
+proc(fatan2_word) fp_call2(atan2)  next()  endp()

@@ -1,0 +1,342 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — iGui graphical-pane primitives.
+;
+; Thin wrappers over the Rust runtime gfx API (rt_gpane_*).  Forth
+; uses these to open a graphical MDI child and draw shapes into it.
+; All ops are batched: gpane-begin opens a batch for a given child,
+; subsequent draws push commands, gpane-present submits to the GUI
+; thread for the next frame.
+;
+; Colours are packed as 0xRRGGBB into a single Forth cell.
+; Coordinates and sizes are signed integer pixels.
+;
+; In the headless `wf64` binary the runtime fns are no-ops, so these
+; primitives are safe to call but produce nothing visible.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+
+; gpane-open  ( w h c-addr u -- id )
+;     Open a new graphical MDI child sized (w × h) with title at
+;     (c-addr, u).  Returns the child_id (non-zero on success) or 0
+;     on failure.
+proc(gpane_open_word)
+    ; Stack: u=TOS, c-addr=[DSP], h=[DSP+cell], w=[DSP+2*cell].
+    mov     rcx, [DSP + 2*cell]                 ; width
+    mov     rdx, [DSP + cell]                   ; height
+    mov     r8,  [DSP]                          ; title_addr
+    mov     r9,  TOS                            ; title_len
+    win64_call(rt_gpane_open)
+    ; Replace top 4 stack cells with the returned id.
+    mov     TOS, rax
+    stk(4, 1)
+    next()
+endp()
+
+
+; gpane-begin  ( id -- )
+;     Begin a draw batch targeting `id`.  Subsequent draw primitives
+;     push commands into the batch on this thread; gpane-present
+;     submits it.
+proc(gpane_begin_word)
+    mov     rcx, TOS                            ; child_id
+    win64_call(rt_gpane_begin)
+    ; Drop id.
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; gpane-present  ( -- )
+;     Submit the current batch to the GUI thread.  Triggers a paint.
+;
+;     Must save/restore TOS around the call: `win64_call` ends in
+;     `call rt_gpane_present`, which clobbers RAX with the runtime
+;     function's return value (0).  RAX *is* TOS in our Forth ABI,
+;     so a naive 0-in-0-out wrapper would silently zero whatever
+;     was on top of the data stack — exactly the bug that bit the
+;     gfx-click / gfx-diag event-loop demos.
+proc(gpane_present_word)
+    mov     [DSP - cell], TOS              ; spill TOS to scratch
+    win64_call(rt_gpane_present)
+    mov     TOS, [DSP - cell]              ; restore TOS
+    next()
+endp()
+
+
+; gpane-clear  ( rgb -- )
+;     Clear the current pane's batch with the packed RGB colour.
+proc(gpane_clear_word)
+    mov     rcx, TOS                            ; rgb
+    win64_call(rt_gpane_clear)
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+
+; gpane-fill-rect  ( x y w h rgb -- )
+;     Push a filled-rectangle command into the current batch.
+proc(gpane_fill_rect_word)
+    ; Stack: rgb=TOS, h=[DSP], w=[DSP+cell], y=[DSP+2*cell], x=[DSP+3*cell]
+    mov     rcx, [DSP + 3*cell]                 ; x
+    mov     rdx, [DSP + 2*cell]                 ; y
+    mov     r8,  [DSP + cell]                   ; w
+    mov     r9,  [DSP]                          ; h
+    ; 5 args: arg5 goes on the stack at [rsp+32].
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48                             ; 32 shadow + 16 for arg5
+    mov     qword ptr [rsp + 32], TOS           ; arg5: rgb
+    call    rt_gpane_fill_rect
+    mov     rsp, r12
+    ; Drop all 5 args.
+    mov     TOS, [DSP + 4*cell]
+    stk(5, 0)
+    next()
+endp()
+
+
+; gpane-stroke-rect  ( x y w h thick rgb -- )
+;     Push a stroked-rectangle command into the current batch.
+proc(gpane_stroke_rect_word)
+    ; Stack: rgb=TOS, thick=[DSP], h=[DSP+cell], w=[DSP+2*cell],
+    ;        y=[DSP+3*cell], x=[DSP+4*cell].
+    mov     rcx, [DSP + 4*cell]                 ; x
+    mov     rdx, [DSP + 3*cell]                 ; y
+    mov     r8,  [DSP + 2*cell]                 ; w
+    mov     r9,  [DSP + cell]                   ; h
+    ; 6 args: arg5 + arg6 on the stack.
+    mov     r13, [DSP]                          ; thick (callee-saved scratch)
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48                             ; 32 shadow + 16 for arg5/arg6
+    mov     qword ptr [rsp + 32], r13           ; arg5: thick
+    mov     qword ptr [rsp + 40], TOS           ; arg6: rgb
+    call    rt_gpane_stroke_rect
+    mov     rsp, r12
+    mov     TOS, [DSP + 5*cell]
+    stk(6, 0)
+    next()
+endp()
+
+
+; gpane-line  ( x0 y0 x1 y1 thick rgb -- )
+;     Push a draw-line command into the current batch.
+proc(gpane_line_word)
+    ; Stack: rgb=TOS, thick=[DSP], y1=[DSP+cell], x1=[DSP+2*cell],
+    ;        y0=[DSP+3*cell], x0=[DSP+4*cell].
+    mov     rcx, [DSP + 4*cell]                 ; x0
+    mov     rdx, [DSP + 3*cell]                 ; y0
+    mov     r8,  [DSP + 2*cell]                 ; x1
+    mov     r9,  [DSP + cell]                   ; y1
+    mov     r13, [DSP]                          ; thick
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48                             ; 32 shadow + 16 for arg5/arg6
+    mov     qword ptr [rsp + 32], r13           ; arg5: thick
+    mov     qword ptr [rsp + 40], TOS           ; arg6: rgb
+    call    rt_gpane_line
+    mov     rsp, r12
+    mov     TOS, [DSP + 5*cell]
+    stk(6, 0)
+    next()
+endp()
+
+
+; gpane-fill-circle  ( cx cy r rgb -- )
+;     Push a filled-circle command into the current batch.
+proc(gpane_fill_circle_word)
+    ; Stack: rgb=TOS, r=[DSP], cy=[DSP+cell], cx=[DSP+2*cell].
+    mov     rcx, [DSP + 2*cell]                 ; cx
+    mov     rdx, [DSP + cell]                   ; cy
+    mov     r8,  [DSP]                          ; r
+    mov     r9,  TOS                            ; rgb
+    win64_call(rt_gpane_fill_circle)
+    mov     TOS, [DSP + 3*cell]
+    stk(4, 0)
+    next()
+endp()
+
+
+; gpane-next-event  ( id timeout-ms -- p4 p3 p2 p1 kind )
+;     Block up to `timeout-ms` for the next event whose `child_id`
+;     equals `id` (or which is a global, e.g. EV_FRAME_CLOSE).
+;     Non-matching events get stashed by the kernel mailbox and the
+;     worker picks them up on its next drain pass — so this is
+;     safe to call from inside a Forth event loop without losing
+;     infrastructure events.
+;
+;     `timeout-ms < 0` blocks indefinitely.  On timeout the result
+;     is (0 0 0 0 0) — `kind = EV_NONE = 0`, all params 0 — so
+;     the stack effect is fixed and callers always pop five cells.
+;
+;     The decoding mirrors `decode_event` in src/runtime.rs:
+;         EV_KEY    ( vkey mods down repeat )
+;         EV_CHAR   ( cp mods 0 0 )
+;         EV_MOUSE  ( x y op mods|button<<8 )
+;         EV_FOCUS  ( gained 0 0 0 )
+;         EV_RESIZE ( w h 0 0 )
+;         EV_CLOSE  ( 0 0 0 0 )
+;         EV_FRAME_CLOSE ( 0 0 0 0 )
+;         EV_TICK   ( time_ms 0 0 0 )
+;
+;     We hand 5 PAD-pointers to the runtime as out-args.  PAD is
+;     thread-local-equivalent (per session) so no cross-call
+;     interference.
+proc(gpane_next_event_word)
+    ; Stack: timeout-ms=TOS, id=[DSP].
+    mov     rcx, [DSP]                          ; arg1: id
+    mov     rdx, TOS                            ; arg2: timeout_ms
+    lea     r8,  [UP + user_PAD + 0]            ; arg3: &kind
+    lea     r9,  [UP + user_PAD + 8]            ; arg4: &p1
+    ; Args 5-7 go on the stack at [rsp+32..56].
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 64                             ; 32 shadow + 32 spill (16-byte aligned)
+    lea     rax, [UP + user_PAD + 16]
+    mov     [rsp + 32], rax                     ; arg5: &p2
+    lea     rax, [UP + user_PAD + 24]
+    mov     [rsp + 40], rax                     ; arg6: &p3
+    lea     rax, [UP + user_PAD + 32]
+    mov     [rsp + 48], rax                     ; arg7: &p4
+    call    rt_gpane_next_event_for
+    mov     rsp, r12
+
+    ; rax now holds 1 if an event was returned (PAD slots filled),
+    ; 0 on timeout (slots zeroed by the runtime).  Either way the
+    ; output shape is fixed: ( id timeout -- p4 p3 p2 p1 kind ),
+    ; net +3 cells (consume 2, leave 5).
+    sub     DSP, 3*cell                         ; allocate 3 fresh cells
+
+    ; Layout after sub DSP, 3*cell — Forth stack (top to bottom):
+    ;   TOS                       (kind, set below)
+    ;   [DSP + 0]                 → p1
+    ;   [DSP + 1*cell]            → p2
+    ;   [DSP + 2*cell]            → p3
+    ;   [DSP + 3*cell]            → p4
+    ;   [DSP + 4*cell]            = previous NOS (unchanged)
+    ;
+    ; Caller asked for ( p4 p3 p2 p1 kind ): kind on TOS, then p1,
+    ; p2, p3, p4 deeper.  That matches the layout above.
+    mov     rax, [UP + user_PAD + 8]            ; p1
+    mov     [DSP + 0],     rax
+    mov     rax, [UP + user_PAD + 16]           ; p2
+    mov     [DSP + 1*cell], rax
+    mov     rax, [UP + user_PAD + 24]           ; p3
+    mov     [DSP + 2*cell], rax
+    mov     rax, [UP + user_PAD + 32]           ; p4
+    mov     [DSP + 3*cell], rax
+    mov     TOS, [UP + user_PAD + 0]            ; kind → TOS
+    next()
+endp()
+
+
+; fractal-iter  ( maxiter -- n )  ( F: z0x z0y cx cy -- )
+;
+;     General Mandelbrot / Julia inner-loop kernel. Pops z₀ = (z0x, z0y)
+;     and c = (cx, cy) from the WF64 FP stack (pushed in order z0x z0y cx cy,
+;     so cy is FP-TOS on entry). Takes maxiter from the data stack TOS.
+;     Returns the escape-iteration count; equals maxiter for interior points.
+;
+;     Algorithm:  z ← z² + c  where  new_zx = zx²−zy²+cx,
+;                                     new_zy = 2·zx·zy+cy.
+;     Bail when |z|² ≥ 4.
+;
+;     Uses only caller-saved XMM0–XMM5; user_FP_TMP is a safe scratch cell
+;     (the float parser stores there only during interpretation, never during
+;     runtime computation).  No callee-saved XMMs touched; no RSP juggling.
+;
+;     XMM roles:  0=zx  1=zy  2=cy  3=cx  4=4.0  5=scratch/new_zy
+;     GPR scratch: r8 (bit pattern for 4.0), r9 (remaining iter budget), r10 (count)
+proc(fractal_iter_word)
+    ; ── pop 4 doubles from the WF64 FP stack ────────────────────────────
+    ; Stack layout (grows down; FP-TOS at lowest address):
+    ;   [FSP+ 0] = cy    [FSP+ 8] = cx
+    ;   [FSP+16] = z0y   [FSP+24] = z0x
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + 24]     ; zx  ← z0x
+    movsd   xmm1, qword ptr [rcx + 16]     ; zy  ← z0y
+    movsd   xmm3, qword ptr [rcx + 8]      ; cx
+    movsd   xmm2, qword ptr [rcx]          ; cy
+    add     rcx, 32
+    mov     [UP + user_FSP], rcx            ; pop all 4 floats
+
+    ; ── load 4.0 into xmm4 via integer bits ─────────────────────────────
+    mov     r8,  0x4010000000000000          ; IEEE-754 double: 4.0
+    movq    xmm4, r8
+
+    ; ── iteration setup ──────────────────────────────────────────────────
+    mov     r9,  TOS                         ; r9  = maxiter (data TOS)
+    xor     r10, r10                         ; r10 = iter count = 0
+
+.iter:
+    test    r9,  r9
+    jz      .done                            ; budget exhausted → interior
+
+    ; ── new_zy = 2·zx·zy + cy  (computed first so old zx, zy are intact) ──
+    movsd   xmm5, xmm0
+    mulsd   xmm5, xmm1                      ; xmm5 = zx·zy
+    addsd   xmm5, xmm5                      ; xmm5 = 2·zx·zy
+    addsd   xmm5, xmm2                      ; xmm5 = new_zy
+    movsd   [UP + user_FP_TMP], xmm5       ; stash new_zy (one double)
+
+    ; ── square z (destroys old zx, zy — both already consumed above) ─────
+    mulsd   xmm1, xmm1                      ; xmm1 = zy²
+    mulsd   xmm0, xmm0                      ; xmm0 = zx²
+
+    ; ── escape test: |z|² = zx² + zy² ≥ 4? ─────────────────────────────
+    movsd   xmm5, xmm0
+    addsd   xmm5, xmm1                      ; xmm5 = |z|²
+    ucomisd xmm5, xmm4
+    jae     .done                            ; escaped
+
+    ; ── new_zx = zx² − zy² + cx  (xmm0 = zx², xmm1 = zy²) ─────────────
+    subsd   xmm0, xmm1                      ; xmm0 = zx² − zy²
+    addsd   xmm0, xmm3                      ; xmm0 = new_zx  (ready for next iter)
+
+    ; ── retrieve new_zy ──────────────────────────────────────────────────
+    movsd   xmm1, [UP + user_FP_TMP]       ; xmm1 = new_zy  (ready for next iter)
+
+    inc     r10
+    dec     r9
+    jmp     .iter
+
+.done:
+    ; Replace data TOS (maxiter) with the escape count.
+    ; Stack effect ( maxiter -- n ) is balanced: stk(1,1) → no adjustment.
+    mov     TOS, r10
+    next()
+endp()
+
+
+; canvas-blit  ( child-id addr w h -- )
+;     Ship a Forth-owned w×h BGRA framebuffer at `addr` to graphical
+;     pane `child-id` as ONE Direct2D bitmap upload — the "canvas" fast
+;     path (see rt_canvas_blit).  Instead of one draw command per pixel,
+;     Forth fills a packed array of 0xAARRGGBB words (native BGRA,
+;     little-endian) and ships the whole frame across in a single call.
+;     The runtime copies the buffer, so the Forth array may be reused or
+;     freed as soon as this returns.  No batch begin/present needed:
+;     canvas-blit submits and repaints on its own.
+proc(canvas_blit_word)
+    ; Stack: h=TOS, w=[DSP], addr=[DSP+cell], child-id=[DSP+2*cell].
+    mov     rcx, [DSP + 2*cell]                 ; child_id
+    mov     rdx, [DSP + cell]                   ; src_addr
+    mov     r8,  [DSP]                          ; w
+    mov     r9,  TOS                            ; h
+    win64_call(rt_canvas_blit)
+    ; Drop all 4 args.
+    mov     TOS, [DSP + 3*cell]
+    stk(4, 0)
+    next()
+endp()

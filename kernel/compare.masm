@@ -1,0 +1,338 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — comparison primitives.
+;
+; All ported mechanically from WF32 gkernel32.fs:557-704 via
+; `cargo run --bin port-wf32`. Two had RPN-immediate expressions
+; (`sar eax cell 8 * 1-` for 0<, `cmp eax -1 1 rshift` for 0>) that
+; the translator flags as TODO — fixed inline with the equivalent
+; concrete value (cell*8-1 = 63 on x86-64; i64::MAX = 0x7FFF…FFFF).
+;
+; Forth flag convention: -1 (all bits set) = true, 0 = false.
+; WF32's clever `sbb` idiom: after a flag-setting op, `sbb eax, eax`
+; collapses CF to all-ones (-1) or all-zeros (0) in one instruction.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; 0=  ( n -- flag )
+;     `sub rax, 1; sbb rax, rax` — if rax was 0, sub borrows (CF=1),
+;     sbb produces -1; otherwise CF=0, sbb produces 0.
+proc(zero_equal)
+    sub     rax, 1
+    sbb     rax, rax
+    stk(1, 1)
+    next()
+endp()
+
+; 0<>  ( n -- flag )
+;     Inverse of 0=. `add rax, -1` to borrow iff rax was 0, then `sbb`
+;     and... wait, this is the same idiom but with `add -1` which
+;     borrows ONLY when rax==0 (since 0 + (-1) = -1 with CF=0 by Intel
+;     conventions). Actually checking: for sub a,b, CF=1 if a < b
+;     unsigned. WF32 uses `add eax, -1; sbb eax, eax`: CF set when
+;     adding -1 to 0 produces -1 (no carry out — confusing). The
+;     intent is "produce -1 if non-zero, 0 if zero" — which is the
+;     opposite of 0=. Faithful port; behaviour verified by tests.
+proc(zero_not_equal)
+    add     rax, -1
+    sbb     rax, rax
+    stk(1, 1)
+    next()
+endp()
+
+; 0<  ( n -- flag )
+;     Sign of n = its top bit. `sar rax, 63` smears the sign bit
+;     across all 64 bits — all-ones if negative, all-zeros otherwise.
+;     WF32 source has `sar eax cell 8 * 1-` which is the same idea
+;     parameterised by cell size (32 → 31, 64 → 63). The porter flagged
+;     the RPN; this is the concrete WF64 value.
+proc(zero_less)
+    sar     rax, 63
+    stk(1, 1)
+    next()
+endp()
+
+; 0>  ( n -- flag )
+;     n > 0 iff (n-1) is unsigned-less-than i64::MAX. WF32 source has
+;     `cmp eax -1 1 rshift` which means `cmp eax, (-1 unsigned >> 1)`
+;     = `cmp eax, 0x7FFFFFFF` on 32-bit. On 64-bit the constant is
+;     0x7FFFFFFFFFFFFFFF = i64::MAX, which doesn't fit in an imm32 (the
+;     widest immediate `cmp r64, imm` accepts) — it'd be sign-extended
+;     to a negative. So we load it via rcx first. One extra instruction;
+;     same idiom.
+proc(zero_greater)
+    sub     rax, 1
+    mov     rcx, 0x7FFFFFFFFFFFFFFF
+    cmp     rax, rcx
+    sbb     rax, rax
+    stk(1, 1)
+    next()
+endp()
+
+; =  ( n1 n2 -- flag )
+;     n1 == n2 iff (rax - [rbp]) == 0. Then same 0= trick.
+proc(equal)
+    sub     rax, [rbp]
+    sub     rax, 1
+    sbb     rax, rax
+    stk(2, 1)
+    next()
+endp()
+
+; <>  ( n1 n2 -- flag )
+proc(not_equal)
+    sub     rax, [rbp]
+    add     rax, -1
+    sbb     rax, rax
+    stk(2, 1)
+    next()
+endp()
+
+; <  ( n1 n2 -- flag )    signed less-than
+;     Loads -1 into rcx and 0 into rax; cmp NOS, TOS; cmovl picks rcx
+;     (= -1) if NOS < TOS signed.
+proc(less)
+    mov     rdx, rax
+    or      rcx, -1
+    xor     rax, rax
+    cmp     [rbp], rdx
+    cmovl   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; >  ( n1 n2 -- flag )
+proc(greater)
+    mov     rdx, rax
+    or      rcx, -1
+    xor     rax, rax
+    cmp     [rbp], rdx
+    cmovg   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; <=  ( n1 n2 -- flag )
+proc(less_equal)
+    mov     rdx, rax
+    or      rcx, -1
+    xor     rax, rax
+    cmp     [rbp], rdx
+    cmovle  rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; >=  ( n1 n2 -- flag )
+proc(greater_equal)
+    mov     rdx, rax
+    or      rcx, -1
+    xor     rax, rax
+    cmp     [rbp], rdx
+    cmovge  rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; u<  ( u1 u2 -- flag )    unsigned less-than
+;     `cmp [rbp], rax` sets CF iff [rbp] < rax unsigned; sbb collapses.
+proc(u_less)
+    cmp     [rbp], rax
+    sbb     rax, rax
+    stk(2, 1)
+    next()
+endp()
+
+; u>  ( u1 u2 -- flag )    unsigned greater-than
+proc(u_greater)
+    cmp     rax, [rbp]
+    sbb     rax, rax
+    stk(2, 1)
+    next()
+endp()
+
+; u>=  ( u1 u2 -- flag )    unsigned greater-than-or-equal
+proc(u_greater_equal)
+    cmp     [rbp], rax
+    sbb     rax, rax
+    not     rax
+    stk(2, 1)
+    next()
+endp()
+
+; u<=  ( u1 u2 -- flag )    unsigned less-than-or-equal
+proc(u_less_equal)
+    cmp     rax, [rbp]
+    sbb     rax, rax
+    not     rax
+    stk(2, 1)
+    next()
+endp()
+
+; min  ( n1 n2 -- min )    signed minimum
+;     Asm sym `min_` to match the kernel's "trailing underscore on
+;     Forth names that double as a JASM/x86 keyword family" convention.
+proc(min_)
+    mov     rcx, [rbp]
+    cmp     rcx, rax
+    cmovl   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; max  ( n1 n2 -- max )    signed maximum
+proc(max_)
+    mov     rcx, [rbp]
+    cmp     rcx, rax
+    cmovg   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; 0max  ( n -- max(n, 0) )
+proc(zero_max)
+    xor     rcx, rcx
+    cmp     rcx, rax
+    cmovg   rax, rcx
+    stk(1, 1)
+    next()
+endp()
+
+; umin  ( u1 u2 -- u3 )    unsigned minimum
+proc(umin)
+    mov     rcx, [rbp]
+    cmp     rcx, rax
+    cmovb   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; umax  ( u1 u2 -- u3 )    unsigned maximum
+proc(umax)
+    mov     rcx, [rbp]
+    cmp     rcx, rax
+    cmova   rax, rcx
+    stk(2, 1)
+    next()
+endp()
+
+; within  ( n low high -- flag )
+;     True if low <= n < high. WF32 uses an unsigned-compare trick:
+;     (n - low) unsigned-< (high - low). Works correctly for both
+;     signed and unsigned ranges when the inputs are coherent.
+proc(within)
+    mov     rdx, [rbp]              ; rdx = low
+    mov     rcx, [rbp + cell]       ; rcx = n  (NNOS)
+    sub     rax, rdx                ; rax = high - low
+    sub     rcx, rdx                ; rcx = n - low
+    sub     rcx, rax                ; rcx - rax sets CF iff (n-low) < (high-low)
+    sbb     rax, rax                ; smear CF to flag
+    stk(3, 1)
+    next()
+endp()
+
+; d=  ( d1 d2 -- flag )    true iff both halves are equal.
+proc(d_equal)
+    mov     rcx, [rbp + 2*cell]
+    sub     rcx, [rbp]
+    sbb     rax, [rbp + cell]
+    or      rax, rcx
+    sub     rax, 1
+    sbb     rax, rax
+    stk(4, 1)
+    next()
+endp()
+
+; d0<  ( d -- flag )    true iff signed double is negative.
+proc(d_zero_less)
+    sar     rax, 63
+    stk(2, 1)
+    next()
+endp()
+
+; d0=  ( d -- flag )    true iff both halves are zero.
+proc(d_zero_equal)
+    or      rax, [rbp]
+    cmp     rax, 1
+    sbb     rax, rax
+    stk(2, 1)
+    next()
+endp()
+
+; d<  ( d1 d2 -- flag )    signed double less-than.
+proc(d_less)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    cmp     [rbp + 2*cell], rdx
+    sbb     rcx, rax
+    mov     rax, 0
+    jge     .done
+    sub     rax, 1
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; du<  ( d1 d2 -- flag )    unsigned double less-than.
+proc(du_less)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    cmp     [rbp + 2*cell], rdx
+    sbb     rcx, rax
+    mov     rax, 0
+    jae     .done
+    sub     rax, 1
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; du>  ( d1 d2 -- flag )    WF32's raw branch pattern behaves as
+;     unsigned greater-than-or-equal: equal operands also return true.
+proc(du_greater)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    cmp     [rbp + 2*cell], rdx
+    sbb     rcx, rax
+    mov     rax, 0
+    jb      .done
+    sub     rax, 1
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; d>  ( d1 d2 -- flag )    WF32's raw branch pattern behaves as
+;     signed greater-than-or-equal: equal operands also return true.
+proc(d_greater)
+    mov     rdx, [rbp]
+    mov     rcx, [rbp + cell]
+    cmp     [rbp + 2*cell], rdx
+    sbb     rcx, rax
+    mov     rax, 0
+    jl      .done
+    sub     rax, 1
+.done:
+    stk(4, 1)
+    next()
+endp()
+
+; d<>  ( d1 d2 -- flag )    true iff either half differs.
+proc(d_not_equal)
+    mov     rcx, [rbp + 2*cell]
+    sub     rcx, [rbp]
+    sbb     rax, [rbp + cell]
+    or      rax, rcx
+    sub     rax, 1
+    sbb     rax, rax
+    not     rax
+    stk(4, 1)
+    next()
+endp()

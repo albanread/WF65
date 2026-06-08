@@ -1,0 +1,297 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — initial floating-point subset.
+;
+; This is a real separate floating-point stack in the user area. The
+; stack grows downward, one IEEE-754 double per 8-byte slot.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; float+  ( f-addr -- f-addr' )
+proc(float_plus)
+    add     rax, cell
+    stk(1, 1)
+    next()
+endp()
+
+; floats  ( n -- n*float )
+proc(floats)
+    shl     rax, 3
+    stk(1, 1)
+    next()
+endp()
+
+; faligned  ( addr -- f-addr )
+proc(faligned)
+    add     rax, cell - 1
+    and     rax, -cell
+    stk(1, 1)
+    next()
+endp()
+
+; falign  ( -- )
+proc(falign)
+    mov     rcx, [UP + user_HERE]
+    add     rcx, cell - 1
+    and     rcx, -cell
+    mov     [UP + user_HERE], rcx
+    next()
+endp()
+
+; float?  ( c-addr u -- -1 | c-addr u 0 )  ( F: -- r )
+;     Parse a decimal floating-point token when BASE is decimal.
+;
+;     Win64 caveat: r10 and r11 are caller-saved volatile registers, so
+;     `win64_call(rt_to_float)` clobbers them. The earlier version held
+;     the original c-addr / u in r10 / r11 across the call, and the
+;     .invalid path then spilled the garbage-r11 to NOS — corrupting the
+;     length pushed back to the interpreter for every decimal token that
+;     wasn't a valid float. Cache `u` in r14 (callee-saved). R15 is
+;     reserved as the locals-stack pointer (LP), so we use r14 here.
+;     c-addr is unchanged at [DSP] across the call, no save needed.
+proc(float_q)
+    mov     r10, [DSP]                      ; original c-addr (only used pre-call)
+    mov     r14, TOS                        ; original u — r14 survives the call
+    cmp     qword ptr [UP + user_BASE], 10
+    jne     .invalid
+    test    r14, r14
+    jz      .invalid
+
+    mov     rcx, r10
+    mov     rdx, r14
+    lea     r8, [UP + user_FP_TMP]
+    win64_call(rt_to_float)
+    test    rax, rax
+    jz      .invalid
+
+    mov     rcx, [UP + user_FSP]
+    sub     rcx, cell
+    mov     rdx, [UP + user_FP_TMP]
+    mov     [rcx], rdx
+    mov     [UP + user_FSP], rcx
+    mov     TOS, -1
+    add     DSP, cell
+    next()
+
+.invalid:
+    mov     [DSP - cell], r14               ; r14 still holds the original u
+    xor     TOS, TOS
+    stk(2, 3)
+    next()
+endp()
+
+; fdepth  ( -- n )
+proc(fdepth)
+    mov     [DSP - cell], TOS
+    mov     rcx, [UP + user_FP0]
+    sub     rcx, [UP + user_FSP]
+    sar     rcx, 3
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; fdrop  ( F: r -- )
+proc(fdrop)
+    mov     rcx, [UP + user_FSP]
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fdup  ( F: r -- r r )
+proc(fdup)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    sub     rcx, cell
+    movsd   qword ptr [rcx], xmm0
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fswap  ( F: r1 r2 -- r2 r1 )
+proc(fswap)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    movsd   xmm1, qword ptr [rcx + cell]
+    movsd   qword ptr [rcx], xmm1
+    movsd   qword ptr [rcx + cell], xmm0
+    next()
+endp()
+
+; fover  ( F: r1 r2 -- r1 r2 r1 )
+proc(fover)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + cell]
+    sub     rcx, cell
+    movsd   qword ptr [rcx], xmm0
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; d>f  ( d -- )  ( F: -- r )
+;     Current subset accepts sign-extended 64-bit doubles.
+proc(d_to_f)
+    mov     rcx, [DSP]
+    cvtsi2sd xmm0, rcx
+    mov     rdx, [UP + user_FSP]
+    sub     rdx, cell
+    movsd   qword ptr [rdx], xmm0
+    mov     [UP + user_FSP], rdx
+    mov     TOS, [DSP + cell]
+    stk(2, 0)
+    next()
+endp()
+
+; f>d  ( -- d )  ( F: r -- )
+proc(f_to_d)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    cvttsd2si rcx, xmm0
+    mov     rdx, rcx
+    sar     rdx, 63
+    mov     [DSP - cell], TOS
+    mov     [DSP - 2*cell], rcx
+    mov     TOS, rdx
+    stk(0, 2)
+    next()
+endp()
+
+; f@  ( f-addr -- )  ( F: -- r )
+proc(f_fetch)
+    mov     rcx, TOS
+    movsd   xmm0, qword ptr [rcx]
+    mov     rdx, [UP + user_FSP]
+    sub     rdx, cell
+    movsd   qword ptr [rdx], xmm0
+    mov     [UP + user_FSP], rdx
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; f!  ( f-addr -- )  ( F: r -- )
+proc(f_store)
+    mov     rcx, TOS
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rdx]
+    movsd   qword ptr [rcx], xmm0
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; f+  ( F: r1 r2 -- r3 )
+proc(f_plus)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + cell]
+    addsd   xmm0, qword ptr [rcx]
+    movsd   qword ptr [rcx + cell], xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f-  ( F: r1 r2 -- r3 )
+proc(f_minus)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + cell]
+    subsd   xmm0, qword ptr [rcx]
+    movsd   qword ptr [rcx + cell], xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f*  ( F: r1 r2 -- r3 )
+proc(f_times)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + cell]
+    mulsd   xmm0, qword ptr [rcx]
+    movsd   qword ptr [rcx + cell], xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; f/  ( F: r1 r2 -- r3 )
+proc(f_slash)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx + cell]
+    divsd   xmm0, qword ptr [rcx]
+    movsd   qword ptr [rcx + cell], xmm0
+    add     rcx, cell
+    mov     [UP + user_FSP], rcx
+    next()
+endp()
+
+; fnegate  ( F: r1 -- r2 )
+proc(f_negate)
+    mov     rcx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rcx]
+    xorpd   xmm1, xmm1
+    subsd   xmm1, xmm0
+    movsd   qword ptr [rcx], xmm1
+    next()
+endp()
+
+; f0=  ( -- flag )  ( F: r -- )
+proc(f_zero_equal)
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rdx]
+    xorpd   xmm1, xmm1
+    ucomisd xmm0, xmm1
+    sete    cl
+    movzx   rcx, cl
+    neg     rcx
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; f0<  ( -- flag )  ( F: r -- )
+proc(f_zero_less)
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rdx]
+    xorpd   xmm1, xmm1
+    ucomisd xmm0, xmm1
+    setb    cl
+    movzx   rcx, cl
+    neg     rcx
+    add     rdx, cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()
+
+; f<  ( -- flag )  ( F: r1 r2 -- )
+proc(f_less)
+    mov     rdx, [UP + user_FSP]
+    movsd   xmm0, qword ptr [rdx + cell]
+    ucomisd xmm0, qword ptr [rdx]
+    setb    cl
+    movzx   rcx, cl
+    neg     rcx
+    add     rdx, 2*cell
+    mov     [UP + user_FSP], rdx
+    mov     [DSP - cell], TOS
+    mov     TOS, rcx
+    stk(0, 1)
+    next()
+endp()

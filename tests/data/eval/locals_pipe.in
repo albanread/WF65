@@ -1,0 +1,3 @@
+: test-pipe ( a b -- ) {: x y | t :} x y + to t t . ;
+7 8 test-pipe
+bye

@@ -1,0 +1,207 @@
+; ─────────────────────────────────────────────────────────────────────
+; WF64 kernel — basic I/O primitives.
+;
+; All go through Rust runtime functions for M3 simplicity. M7 can swap
+; them for direct WriteConsoleA / ReadConsoleA calls if anything cares.
+; ─────────────────────────────────────────────────────────────────────
+
+; ─────────────────────────────────────────────────────────────────────
+; REMINDER: RAX is the cached TOS (top of data stack).
+; Any instruction that writes RAX (mov, xor, shl, add, lea, mul, div,
+; rep movsb's implicit clobbers, etc.) destroys the user's TOS unless
+; it has been spilled to [DSP - cell] first. When scratching, prefer
+; RCX/RDX/R8-R11. Save the original TOS in another register at the
+; function prologue if any later branch needs it back.
+; ─────────────────────────────────────────────────────────────────────
+
+; emit  ( ch -- )
+;     Write one byte (low 8 bits of TOS) to stdout.
+proc(emit)
+    mov     rcx, TOS                 ; Win64 arg1 = char
+    win64_call(rt_emit)
+    mov     TOS, [DSP]               ; raise NOS to TOS
+    stk(1, 0)
+    next()
+endp()
+
+; type  ( addr u -- )
+;     Write u bytes from addr to stdout.
+proc(type_word)
+    mov     rcx, [DSP]               ; arg1 = addr
+    mov     rdx, TOS                 ; arg2 = len
+    win64_call(rt_type)
+    mov     TOS, [DSP + cell]        ; raise NNOS
+    stk(2, 0)
+    next()
+endp()
+
+; key  ( -- char )
+;     Read one byte from the current input source without echoing it.
+proc(key_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_read_key)
+    mov     TOS, rax
+    stk(0, 1)
+    next()
+endp()
+
+; key?  ( -- flag )
+;     True when KEY can return a character without blocking.
+proc(key_q_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_key_q)
+    mov     TOS, rax
+    stk(0, 1)
+    next()
+endp()
+
+; cr  ( -- )
+;     Write a newline.
+proc(cr_word)
+    mov     [DSP - cell], TOS        ; spill old TOS
+    mov     rcx, 10                  ; LF
+    win64_call(rt_emit)
+    mov     TOS, [DSP - cell]        ; restore — rax was clobbered by the call
+    next()                           ; 0 in, 0 out — balanced
+endp()
+
+; BRK  ( -- )
+; INT3 ( -- )
+;     Non-fatal debugger breakpoints for Forth code. Prints a Forth-tuned
+;     state dump (data stack, return stack, key user variables) via
+;     rt_forth_brk, then fires INT 3 so a native debugger can also catch
+;     it. The VEH handler resumes execution after INT 3.
+proc(brk_word)
+    mov     r14, TOS                        ; save TOS (r14 callee-saved; r15 reserved for LP)
+    ; ── Call rt_forth_brk(tos, dsp, sp0, rsp, up) ─────────────────
+    ; Win64 5-arg convention: rcx/rdx/r8/r9 for args 1-4; arg5 at
+    ; [rsp+32] after the shadow-space allocation.  We allocate
+    ; 48 bytes (32 shadow + 8 for arg5 + 8 alignment pad) so the
+    ; stack stays 16-byte aligned before the CALL.
+    mov     rcx, TOS                        ; arg1 = tos
+    mov     rdx, DSP                        ; arg2 = dsp
+    mov     r8,  [UP + user_SP0]            ; arg3 = sp0
+    mov     r9,  rsp                        ; arg4 = current Forth RSP
+    mov     r12, rsp                        ; Win64 RSP-save slot (same pattern as win64_call)
+    and     rsp, -16
+    sub     rsp, 48
+    mov     [rsp + 32], rbx                 ; arg5 = UP (user area pointer = RBX)
+    call    rt_forth_brk
+    mov     rsp, r12
+    ; ── Fire INT 3 for native debugger ──────────────────────────────
+    int 3
+    mov     TOS, r14                        ; restore TOS
+    next()
+endp()
+
+proc(int3_word)
+    mov     r14, TOS
+    mov     rcx, TOS
+    mov     rdx, DSP
+    mov     r8,  [UP + user_SP0]
+    mov     r9,  rsp
+    mov     r12, rsp
+    and     rsp, -16
+    sub     rsp, 48
+    mov     [rsp + 32], rbx
+    call    rt_forth_brk
+    mov     rsp, r12
+    int 3
+    mov     TOS, r14
+    next()
+endp()
+
+; trace  ( -- )
+;     Enable per-word tracing: before each interpreted word is executed
+;     the interpreter prints the word name and current stack.
+proc(trace_word)
+    mov     qword ptr [UP + user_TRACE], 1
+    next()
+endp()
+
+; notrace  ( -- )
+;     Disable per-word tracing.
+proc(notrace_word)
+    mov     qword ptr [UP + user_TRACE], 0
+    next()
+endp()
+
+; cpuid  ( addr leaf -- )
+;     Execute CPUID with EAX=leaf and ECX=0, writing EAX/EBX/ECX/EDX
+;     as four 32-bit little-endian words at addr.
+proc(cpuid_word)
+    mov     rdi, [DSP]               ; rdi = buffer addr
+    mov     rsi, rbx                 ; save UP — cpuid clobbers rbx
+    xor     ecx, ecx                 ; this one-arg form uses subleaf 0
+    cpuid
+    mov     dword ptr [rdi], eax
+    mov     dword ptr [rdi + 4], ebx
+    mov     dword ptr [rdi + 8], ecx
+    mov     dword ptr [rdi + 12], edx
+    mov     rbx, rsi                 ; restore UP
+    mov     rax, [rbp + cell]        ; raise NNOS into TOS
+    stk(2, 0)
+    next()
+endp()
+
+; rdtsc  ( -- lo hi )
+;     Read the time-stamp counter, returning low then high 32-bit
+;     halves as zero-extended cells. Serialise first with cpuid.
+proc(rdtsc_word)
+    mov     [DSP - cell], TOS        ; spill old TOS under the result pair
+    xor     eax, eax
+    mov     rsi, rbx                 ; save UP — cpuid clobbers rbx
+    cpuid
+    rdtsc
+    mov     [DSP - 2*cell], rax      ; low half
+    mov     rax, rdx                 ; high half in TOS
+    mov     rbx, rsi                 ; restore UP
+    stk(0, 2)
+    next()
+endp()
+
+; ── File include runtime helpers ──────────────────────────────────────────
+
+; rt-slurp-file  ( c-addr u -- ptr )
+;     Read file at path (c-addr u) into a Rust-owned Vec and push it onto
+;     the slurp stack. Return the content pointer, or 0 on error.
+proc(rt_slurp_file_word)
+    mov     rcx, [DSP]               ; arg1 = path addr
+    mov     rdx, TOS                 ; arg2 = path len
+    win64_call(rt_slurp_file)
+    ; rax = content ptr or 0
+    stk(2, 1)
+    next()
+endp()
+
+; rt-slurp-len  ( -- u )
+;     Return the byte length of the top slurped file, or 0 if empty.
+proc(rt_slurp_len_word)
+    mov     [DSP - cell], TOS
+    win64_call(rt_slurp_len)
+    ; rax = len
+    stk(0, 1)
+    next()
+endp()
+
+; rt-slurp-pop  ( -- )
+;     Pop and free the top slurped file from the stack.
+proc(rt_slurp_pop_word)
+    mov     [DSP - cell], TOS        ; spill TOS across the Win64 call
+    win64_call(rt_slurp_pop)
+    mov     TOS, [DSP - cell]        ; restore TOS (rax was clobbered)
+    next()
+endp()
+
+; bye  ( -- )
+;     Request termination. Cooperative: writes 1 into user_BYE_REQ;
+;     quit's dispatch loop checks the flag at the top of every line
+;     and at the top of every token iteration, and returns from quit
+;     when it's set. That unwinds to forth_main → its caller (Rust),
+;     which lets the test harness regain control without longjmp,
+;     SEH, or ExitProcess. The interactive REPL wrapper in main.rs
+;     turns a clean return into a process exit.
+proc(bye)
+    mov     qword ptr [UP + user_BYE_REQ], 1
+    next()
+endp()

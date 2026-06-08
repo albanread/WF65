@@ -1,0 +1,11 @@
+class animal end-class
+animal subclass dog end-class
+animal new a
+dog new d
+a object? .
+a class? .
+animal class? .
+d animal is-a? .
+a dog is-a? .
+d .class
+bye

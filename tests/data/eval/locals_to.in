@@ -1,0 +1,3 @@
+: test-to ( x -- ) {: a :} a . 99 to a a . ;
+42 test-to
+bye

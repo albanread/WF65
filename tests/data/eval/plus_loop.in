@@ -1,0 +1,4 @@
+# requires: do +loop i
+: evens  10 0 DO I . 2 +LOOP ;
+evens
+bye

@@ -1,0 +1,4 @@
+CODE: add7 add rax, 7 ;CODE
+5 add7 .
+' add7 >name count type
+bye

@@ -1,0 +1,15 @@
+\ '\' followed by whitespace is the ANS line-comment word.
+\ '\' followed by any other char is just part of a token.
+\ Verify both behaviours.
+
+\ This whole line is a comment because '\' is followed by a space.
+1 2 + .
+\ Define a word whose name contains '\' (not followed by space).
+: foo\bar 42 ;
+foo\bar .
+
+\ '\' is consumed as a comment even when the comment text starts with '('
+\ (no paren-comment confusion).
+\ ( this is part of the line comment, including the unmatched paren
+99 .
+bye
