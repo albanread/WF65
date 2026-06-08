@@ -1,34 +1,34 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "75f39ff9edbeed1ccd250289bec8a089c9377d04ba0cbec8b50f2d6da3caaee6",
+  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
   "corpus_file_hash": "12347e8c2918d4109d18b7a6dc1302e75dfb01ca59b17a3f15a15a7836f4c332",
   "words": {
     "long-arith": {
-      "byte_length": 131,
-      "call_count_E8": 9,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "byte_length": 161,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "6274bfb16b209cbac39bf164fec447de2f62c1a21d0b108cbb8b39085f257616",
-      "instruction_count": 31,
-      "rbp_adjust_count": 10
+      "body_hash": "53b914b06df52a07c374c08df6299e54ce694d56383443d25e64b577a7471f65",
+      "instruction_count": 41,
+      "rbp_adjust_count": 20
     },
     "shuffle-a": {
-      "byte_length": 66,
-      "call_count_E8": 5,
+      "byte_length": 75,
+      "call_count_E8": 2,
       "jmp_count_E9": 1,
       "tail_is_jmp": true,
       "do_lit_count": 0,
-      "body_hash": "58190a6110cb0444d8783c8135c996cd82a2da5f7be662506f4be89cfe48c239",
-      "instruction_count": 16,
-      "rbp_adjust_count": 2
+      "body_hash": "2259effdbeeca148d73c4b5615856031c5a33ee9c3afbe3faa77b07fb14f70eb",
+      "instruction_count": 19,
+      "rbp_adjust_count": 5
     }
   },
   "file_totals": {
-    "bytes": 197,
-    "instr": 47,
-    "calls": 14,
-    "jmps": 2,
+    "bytes": 236,
+    "instr": 60,
+    "calls": 2,
+    "jmps": 1,
     "do_lit": 0
   }
 }

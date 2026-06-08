@@ -2066,20 +2066,22 @@ fn literal_fold_all_binops_emit_their_immediate_form() {
 }
 
 #[test]
-fn literal_fold_skipped_when_no_preceding_literal() {
-    // `+` with no preceding literal must fall back to a plain CALL
-    // (no fold).  Phase A2's tail-call optimisation then patches the
-    // CALL into a JMP because `+` is the last word before `;`, so
-    // the final bytes are `JMP plus; RET` (the RET is dead code).
+fn bare_binop_inlined_when_no_preceding_literal() {
+    // `+` with no preceding literal can't fold, so (T2 bare-op inline) it is
+    // emitted INLINE as `add rax,[rbp] ; add rbp,8` — no CALL, no JMP —
+    // followed by the definition's RET.  (Previously this fell back to a CALL
+    // that `;`/TCO patched into a JMP.)
     let mut s = sess();
     let out = s.eval(": twoadd + ;\nbye\n").unwrap();
     assert_eq!(out, " ok\n");
     s.call("latestxt").unwrap();
     let xt = s.pop() as u64;
-    let bytes = unsafe { std::slice::from_raw_parts(xt as *const u8, 6) };
-    assert_eq!(bytes[0], 0xE9,
-        "expected JMP opcode (CALL → JMP via TCO), got {:02X}", bytes[0]);
-    assert_eq!(bytes[5], 0xC3, "expected trailing RET, got {:02X}", bytes[5]);
+    let bytes = unsafe { std::slice::from_raw_parts(xt as *const u8, 9) };
+    assert_eq!(
+        bytes,
+        &[0x48, 0x03, 0x45, 0x00, 0x48, 0x83, 0xC5, 0x08, 0xC3],
+        "expected inline `add rax,[rbp]; add rbp,8; ret`, got {bytes:02X?}"
+    );
 
     // Behaviour: 3 4 twoadd → 7
     let out = s.eval("3 4 twoadd .\nbye\n").unwrap();

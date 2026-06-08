@@ -1,44 +1,44 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "75f39ff9edbeed1ccd250289bec8a089c9377d04ba0cbec8b50f2d6da3caaee6",
+  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
   "corpus_file_hash": "8be231d9459e5231c3cc33a65eb7ae1230c387e163e8a87459c2b5649b79990f",
   "words": {
     "bare-add": {
-      "byte_length": 6,
+      "byte_length": 9,
       "call_count_E8": 0,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "69827dbe0b041f3d9813fbe5ae72a5db791f866df98541de3befef4ed8a6466f",
-      "instruction_count": 2,
-      "rbp_adjust_count": 0
-    },
-    "bare-chain": {
-      "byte_length": 34,
-      "call_count_E8": 4,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
-      "do_lit_count": 0,
-      "body_hash": "14da7b73668e90218bce68e22a7e7fcb584acb73879cbbed427ced13bd3cf544",
-      "instruction_count": 8,
+      "body_hash": "e9d4df75ee830274f1926e3baa0d999c71b9de3ad7ae6f37220f7f9d1fce6d02",
+      "instruction_count": 3,
       "rbp_adjust_count": 1
     },
+    "bare-chain": {
+      "byte_length": 50,
+      "call_count_E8": 1,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
+      "do_lit_count": 0,
+      "body_hash": "f48b2933e9a2db0687b365f43d3220fccba19a74b073d4d0980dd7e17b4d5e15",
+      "instruction_count": 13,
+      "rbp_adjust_count": 5
+    },
     "bare-mem": {
-      "byte_length": 212,
-      "call_count_E8": 21,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "byte_length": 242,
+      "call_count_E8": 13,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 3,
-      "body_hash": "507d129d44fe1dc4325e7777353b80157c4b2a62a3dca45f545ea2330024ff91",
-      "instruction_count": 43,
-      "rbp_adjust_count": 2
+      "body_hash": "0e741cf52c2b89a3be4de3bca8e8ae0d4a6a538d3a83dfdf1a15310e1121e9a1",
+      "instruction_count": 55,
+      "rbp_adjust_count": 6
     }
   },
   "file_totals": {
-    "bytes": 252,
-    "instr": 53,
-    "calls": 25,
-    "jmps": 3,
+    "bytes": 301,
+    "instr": 71,
+    "calls": 14,
+    "jmps": 0,
     "do_lit": 3
   }
 }

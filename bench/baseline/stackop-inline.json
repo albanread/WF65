@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "75f39ff9edbeed1ccd250289bec8a089c9377d04ba0cbec8b50f2d6da3caaee6",
+  "kernel_fingerprint": "e1219bc5928900ec5201149e45f3de23a227cd1860b53459d0cb10c017048f6f",
   "corpus_file_hash": "40ef4264acd6e4b9bc9cd4f8e4ec507102e73dd6d9faf4daa3cfb59a0d3c1ab2",
   "words": {
     "clamp": {
@@ -14,14 +14,14 @@
       "rbp_adjust_count": 0
     },
     "dup-step": {
-      "byte_length": 46,
-      "call_count_E8": 3,
+      "byte_length": 55,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "08dad563f37b57edf991134f6050a09389fe809f5e6033111faef84095fd23a3",
-      "instruction_count": 11,
-      "rbp_adjust_count": 3
+      "body_hash": "767ecad3b85d5a0e5db0ea3fd0c28971168b448b90ab7b7cc654481acaba7a3c",
+      "instruction_count": 14,
+      "rbp_adjust_count": 6
     },
     "dups": {
       "byte_length": 81,
@@ -54,31 +54,31 @@
       "rbp_adjust_count": 1
     },
     "swap-step": {
-      "byte_length": 67,
-      "call_count_E8": 2,
+      "byte_length": 70,
+      "call_count_E8": 1,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "a3c9c232d98c1b39fe7e189526d47f939a162f550d37b25cc75265561b15867d",
-      "instruction_count": 18,
-      "rbp_adjust_count": 1
+      "body_hash": "e9af185ff2238fe3c8f782135908f682dd18434b067e2838922551cff5d75f5c",
+      "instruction_count": 19,
+      "rbp_adjust_count": 2
     },
     "swaps": {
-      "byte_length": 118,
+      "byte_length": 121,
       "call_count_E8": 5,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 2,
-      "body_hash": "de223a8d4977f21d8d10805eb7a8e1a47ee7b05ef6ed39b6942108c99a093c62",
-      "instruction_count": 26,
-      "rbp_adjust_count": 1
+      "body_hash": "025d83bc3d703db30c9249b0bf31f89221e66d83e262aced6e01d0c57714d91b",
+      "instruction_count": 27,
+      "rbp_adjust_count": 2
     }
   },
   "file_totals": {
-    "bytes": 473,
-    "instr": 110,
-    "calls": 16,
-    "jmps": 2,
+    "bytes": 488,
+    "instr": 115,
+    "calls": 12,
+    "jmps": 1,
     "do_lit": 6
   }
 }

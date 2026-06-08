@@ -206,7 +206,18 @@ proc(fold_plus_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    ; bare + (no foldable literal): inline `add rax,[rbp] ; add rbp,8`
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; add rax, [rbp]
+    mov     byte ptr [r8 + 1], 0x03
+    mov     byte ptr [r8 + 2], 0x45
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 5], 0x83
+    mov     byte ptr [r8 + 6], 0xC5
+    mov     byte ptr [r8 + 7], 0x08
+    add     r8, 8
+    jmp     .commit
 endp()
 
 ; fold--,  ( xt -- )      SUB rax, imm
@@ -234,7 +245,21 @@ proc(fold_minus_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    ; bare - (no foldable literal): inline `neg rax ; add rax,[rbp] ; add rbp,8`
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; neg rax
+    mov     byte ptr [r8 + 1], 0xF7
+    mov     byte ptr [r8 + 2], 0xD8
+    mov     byte ptr [r8 + 3], 0x48          ; add rax, [rbp]
+    mov     byte ptr [r8 + 4], 0x03
+    mov     byte ptr [r8 + 5], 0x45
+    mov     byte ptr [r8 + 6], 0x00
+    mov     byte ptr [r8 + 7], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 8], 0x83
+    mov     byte ptr [r8 + 9], 0xC5
+    mov     byte ptr [r8 + 10], 0x08
+    add     r8, 11
+    jmp     .commit
 endp()
 
 ; fold-*,  ( xt -- )      IMUL rax, rax, imm  (no accumulator special form,
@@ -264,7 +289,19 @@ proc(fold_times_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    ; bare * (no foldable literal): inline `imul rax,[rbp] ; add rbp,8`
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; imul rax, [rbp]
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xAF
+    mov     byte ptr [r8 + 3], 0x45
+    mov     byte ptr [r8 + 4], 0x00
+    mov     byte ptr [r8 + 5], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 6], 0x83
+    mov     byte ptr [r8 + 7], 0xC5
+    mov     byte ptr [r8 + 8], 0x08
+    add     r8, 9
+    jmp     .commit
 endp()
 
 ; fold-and,  ( xt -- )    AND rax, imm
@@ -826,6 +863,54 @@ proc(inline_over_comp)
     mov     byte ptr [r8 + 11], 0x08
     add     r8, 12
     mov     [UP + user_HERE], r8
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-@,  ( xt -- )
+;     Emit bare @ (fetch) inline: `mov rax, [rax]`.  No fold form (an address
+;     literal `addr @` is rare and not worth a special case); a bare @ used to
+;     compile to a 5-byte CALL.
+proc(inline_fetch_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rax, [rax]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x00
+    add     r8, 3
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-!,  ( xt -- )
+;     Emit bare ! (store) inline, mirroring proc(store):
+;       mov rcx, [rbp]      ; value = NOS
+;       mov [rax], rcx      ; *addr = value
+;       mov rax, [rbp+8]    ; raise NNOS to TOS
+;       add rbp, 16         ; drop two cells
+proc(inline_store_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov [rax], rcx
+    mov     byte ptr [r8 + 5], 0x89
+    mov     byte ptr [r8 + 6], 0x08
+    mov     byte ptr [r8 + 7], 0x48          ; mov rax, [rbp+8]
+    mov     byte ptr [r8 + 8], 0x8B
+    mov     byte ptr [r8 + 9], 0x45
+    mov     byte ptr [r8 + 10], 0x08
+    mov     byte ptr [r8 + 11], 0x48         ; add rbp, 16
+    mov     byte ptr [r8 + 12], 0x83
+    mov     byte ptr [r8 + 13], 0xC5
+    mov     byte ptr [r8 + 14], 0x10
+    add     r8, 15
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
     mov     TOS, [DSP]
     stk(1, 0)
     next()

@@ -636,6 +636,8 @@ pub const KERNEL_HELPERS: &[&str] = &[
     "inline_drop_comp",
     "inline_swap_comp",
     "inline_over_comp",
+    "inline_fetch_comp",
+    "inline_store_comp",
     "inline_to_r_comp",
     "inline_r_from_comp",
     "inline_r_fetch_comp",
@@ -1590,6 +1592,10 @@ impl Wf64Session {
             "drop_" => Some("inline_drop_comp"),
             "swap_" => Some("inline_swap_comp"),
             "over_" => Some("inline_over_comp"),
+            // Bare memory ops: inline the load/store instead of a CALL. A bare
+            // @ / ! has no foldable literal operand, so inlining is the only win.
+            "fetch" => Some("inline_fetch_comp"),
+            "store" => Some("inline_store_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),
