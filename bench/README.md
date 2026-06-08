@@ -37,9 +37,21 @@ cargo run --bin opt-bench --features opt-metrics -- --bless
 # run the CI gate
 cargo test --features opt-metrics --test optimizer_static_gate
 
+# advisory dynamic timing (rdtsc, off the gate path) — prints median ± MAD
+# cyc/iter and a current/baseline ratio; writes git-ignored *.timing.json
+cargo run --bin opt-bench --features opt-metrics -- --dynamic
+
 # compare two baseline snapshots
 cargo run --bin opt-bench --features opt-metrics -- --diff old.json new.json
 ```
+
+The dynamic layer drives each hot word's timed loop **inside Forth** (one
+`call_xt` per rep brackets an M-iteration loop between two in-Forth RDTSC reads),
+so it measures the word, not the Rust→Forth call cost. It takes the median (and
+min) over K reps with the thread pinned to one core at high priority. It is
+purely advisory: nothing here is asserted, and it has zero authority over any
+exit code. `bench/manifest.json` supplies each hot word's args + iteration
+count.
 
 Without `--features opt-metrics` the module, bin, and test all vanish from the
 build graph — the shipping binaries never pull in the decoder/hasher deps, and a

@@ -46,6 +46,11 @@ pub mod gc;
 #[cfg(feature = "opt-metrics")]
 pub mod opt_metrics;
 
+// Advisory dynamic (rdtsc/utime) timing layer for the optimizer harness. Kept
+// strictly off the static gate's path — see src/opt_timing.rs.
+#[cfg(feature = "opt-metrics")]
+pub mod opt_timing;
+
 // iGui — Windows MDI front-end, ported from NewCormanLisp.
 // Lives behind cfg(windows); the module file applies its own
 // cfg(windows) gates on the renderer/window code.

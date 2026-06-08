@@ -21,6 +21,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let bless = args.iter().any(|a| a == "--bless");
     let strict = args.iter().any(|a| a == "--strict");
+    let dynamic = args.iter().any(|a| a == "--dynamic");
     let _check = args.iter().any(|a| a == "--check"); // report and --check share the gate path
 
     if let Some(i) = args.iter().position(|a| a == "--diff") {
@@ -41,7 +42,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match run(bless, strict) {
+    match run(bless, strict, dynamic) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("opt-bench failed: {e:#}");
@@ -50,7 +51,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(bless: bool, strict: bool) -> Result<ExitCode> {
+fn run(bless: bool, strict: bool, dynamic: bool) -> Result<ExitCode> {
     let mut session = Wf64Session::new()?;
     let do_lit = opt_metrics::probe_do_lit(&mut session)?;
     match do_lit {
@@ -127,6 +128,18 @@ fn run(bless: bool, strict: bool) -> Result<ExitCode> {
             "\nheadline vs baseline:  {} bytes saved   {} calls eliminated   {} tail-jmps gained",
             tot_bytes_saved, tot_calls_elim, tot_jmps_gained
         );
+    }
+
+    if dynamic {
+        println!("\nadvisory dynamic (rdtsc, off the gate path — never affects exit code):");
+        match wf64::opt_timing::run_dynamic(&mut session, 11, 2) {
+            Ok(lines) => {
+                for l in lines {
+                    println!("{l}");
+                }
+            }
+            Err(e) => eprintln!("  dynamic layer skipped: {e:#}"),
+        }
     }
 
     Ok(if any_regression {
