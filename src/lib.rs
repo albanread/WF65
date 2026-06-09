@@ -1634,6 +1634,10 @@ impl Wf64Session {
             "mod_" => Some("inline_leaf_comp"),
             "slash_mod" => Some("inline_leaf_comp"),
             "plus_store" => Some("inline_leaf_comp"),
+            // min/max (cmov) and abs (branchless cqo/xor/sub) — leaf bodies.
+            "min_" => Some("inline_leaf_comp"),
+            "max_" => Some("inline_leaf_comp"),
+            "abs" => Some("inline_leaf_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),

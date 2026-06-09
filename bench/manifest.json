@@ -19,6 +19,8 @@
     "cmp-chain":   { "file": "bareop-compare.f",    "transform": 2, "arg": "3 5",        "iterations": 200000, "verdict": true },
     "logic-chain": { "file": "bareop-compare.f",    "transform": 2, "arg": "12 10",      "iterations": 200000, "verdict": true },
     "shift-chain": { "file": "bareop-compare.f",    "transform": 2, "arg": "255 3",      "iterations": 200000, "verdict": true },
-    "zero-chain":  { "file": "bareop-compare.f",    "transform": 2, "arg": "-7",         "iterations": 200000, "verdict": true }
+    "zero-chain":  { "file": "bareop-compare.f",    "transform": 2, "arg": "-7",         "iterations": 200000, "verdict": true },
+    "minmax":      { "file": "bareop-compare.f",    "transform": 2, "arg": "3 9",        "iterations": 200000, "verdict": true },
+    "absval":      { "file": "bareop-compare.f",    "transform": 2, "arg": "-5",         "iterations": 200000, "verdict": true }
   }
 }

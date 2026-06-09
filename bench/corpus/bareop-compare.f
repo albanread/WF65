@@ -37,8 +37,16 @@
   dup 0<  r> or
   >r drop r> ;
 
+\ minmax ( a b -- r ) : bare min / max (cmov-based) then bare -.
+: minmax ( a b -- r ) 2dup min -rot max swap - ;
+
+\ absval ( n -- m ) : bare abs (branchless cqo/xor/sub).
+: absval ( n -- m ) abs ;
+
 \ load-time self-check: exercise once, leave the stack balanced.
 3 5 cmp-chain drop
 12 10 logic-chain drop
 255 3 shift-chain drop
 -7 zero-chain drop
+3 9 minmax drop
+-5 absval drop
