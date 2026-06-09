@@ -996,8 +996,8 @@ endp()
 ; (inline-var,)  ( xt -- )
 ;     Compile helper installed (via hotvariable) on a hot variable so that a
 ;     reference to it compiles to an INLINE push of its body address instead of
-;     a CALL into the create stub.  body = xt + create_stub_size (see
-;     proc(to_body)).  Emits:
+;     a CALL into the create stub.  body = the data-region address baked into the
+;     stub's `mov rax, imm64` at xt+6 (same as proc(to_body)).  Emits:
 ;         mov [rbp-8], rax        ; spill TOS
 ;         sub rbp, 8              ; bump DSP
 ;         mov rax, <body imm64>   ; new TOS = body address
@@ -1015,8 +1015,8 @@ proc(inline_var_comp)
     mov     byte ptr [r8 + 7], 0x08
     mov     byte ptr [r8 + 8], 0x48          ; mov rax, imm64
     mov     byte ptr [r8 + 9], 0xB8
-    lea     rcx, [rax + create_stub_size]    ; rcx = body address
-    mov     [r8 + 10], rcx                   ; imm64 = body address
+    mov     rcx, [rax + 6]                   ; body address = stub's baked imm64
+    mov     [r8 + 10], rcx                   ; imm64 = body address (data region)
     add     r8, 18
     mov     [UP + user_HERE], r8
     mov     qword ptr [UP + user_TAIL_CALL], 0
@@ -2609,8 +2609,8 @@ proc(create_word)
     mov     r8, [UP + user_LATEST]
     mov     byte ptr [r8 + dh_tfa], tfa_tcre
 
-    mov     r9, [UP + user_HERE]             ; xt
-    lea     r10, [r9 + create_stub_size]     ; body address
+    mov     r9, [UP + user_HERE]             ; xt (stub location, code region)
+    mov     r10, [UP + user_VAR_HERE]        ; body address (RW data region)
 
     ; mov [rbp-8], rax
     mov     byte ptr [r9 + 0], 0x48
@@ -2628,11 +2628,14 @@ proc(create_word)
     mov     byte ptr [r9 + 17], 0x08
     ; ret
     mov     byte ptr [r9 + 18], 0xC3
-    ; Clear the padding bytes so the body starts from known contents.
+    ; Clear the stub padding bytes (code region; never executed past the ret).
     mov     dword ptr [r9 + 19], 0
     mov     byte ptr [r9 + 23], 0
 
-    mov     [UP + user_HERE], r10
+    ; Code-here advances past the stub only; the body lives in the data region
+    ; (user_VAR_HERE), grown by the following , / allot.
+    lea     r11, [r9 + create_stub_size]
+    mov     [UP + user_HERE], r11
     mov     [UP + user_LATESTXT], r9
     next()
 endp()

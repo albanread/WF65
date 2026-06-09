@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "kernel_fingerprint": "8b6de973ebf5925babd81c0f6391d507159df2548d0fb6dcf4517dac799fd2c3",
+  "kernel_fingerprint": "33f629c31abb67b49ee312210aa3933f06d8f40bb3d8c8e57422357f1ca23070",
   "corpus_file_hash": "e071752be7c5f8b8ed01361ef38c8adf6c0f0850ebca0b5263f9bcbd62baccf3",
   "words": {
     "cold-sum": {
@@ -19,7 +19,7 @@
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 2,
-      "body_hash": "19485aba5fe8f2dadaf4c34ca681d20b68fbea362e786e138183eec972fbd4b7",
+      "body_hash": "1154cb440c043d60ca7da9be07d95637c79c2490003b6e41c3c4372e8370730b",
       "instruction_count": 46,
       "rbp_adjust_count": 9
     }

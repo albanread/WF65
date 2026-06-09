@@ -38,10 +38,10 @@ endp()
 
 ; falign  ( -- )
 proc(falign)
-    mov     rcx, [UP + user_HERE]
+    mov     rcx, [UP + user_VAR_HERE]        ; data space (floats are data)
     add     rcx, cell - 1
     and     rcx, -cell
-    mov     [UP + user_HERE], rcx
+    mov     [UP + user_VAR_HERE], rcx
     next()
 endp()
 

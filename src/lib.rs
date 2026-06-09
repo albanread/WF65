@@ -685,6 +685,12 @@ const OFFSET_DICT_BASE: u64 = 0xC0000;
 // Not constrained to the ±2 GB near-region (only relative addressing
 // off R15 is used, so the absolute address doesn't matter).
 const LOCALS_REGION_SIZE: usize = 1 * 1024 * 1024;
+// Data space for variables / create bodies. Separate PAGE_READWRITE (no-execute)
+// VirtualAlloc so writes to a variable body never touch executable code pages
+// (no SMC machine clears) and code is never writable through it (W^X). Bodies
+// are reached via absolute addresses baked into each create stub, so this region
+// can live anywhere in the address space.
+const VAR_REGION_SIZE: usize = 16 * 1024 * 1024;
 
 // User-area offsets — mirror kernel/macros.masm.
 const USER_BASE_VAR:     u64 = 0x00;
@@ -736,6 +742,11 @@ pub(crate) const USER_OOP_IVARS_WID:  u64 = 0x1808;
 // and size are published here at boot for runtime.rs to build a CodeArena.
 pub(crate) const USER_JIT_ARENA_BASE: u64 = 0x1810;
 pub(crate) const USER_JIT_ARENA_SIZE: u64 = 0x1818;
+// Data space (variables / create bodies) lives in a separate RW / no-execute
+// region — never in the executable dictionary. Keeps W^X and avoids the
+// self-modifying-code machine clear that hit `v ! ; call v` patterns.
+pub(crate) const USER_VAR_HERE:  u64 = 0x1820;  // data-space bump pointer
+pub(crate) const USER_VAR_LIMIT: u64 = 0x1828;  // end of the data region
 /// Size of the runtime JIT code arena (`CODE:`/`LET`). 32 MB — plenty for
 /// thousands of small words, well inside the rel32 window.
 const JIT_ARENA_SIZE: usize = 32 * 1024 * 1024;
@@ -1105,6 +1116,24 @@ fn alloc_locals_region() -> Result<*mut c_void> {
     Ok(base)
 }
 
+/// RW / no-execute region holding all data-space allocations (variable and
+/// create-word bodies). Separate from the executable dictionary for W^X.
+fn alloc_var_region() -> Result<*mut c_void> {
+    let base = unsafe {
+        VirtualAlloc(
+            ptr::null_mut(),
+            VAR_REGION_SIZE,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
+    if base.is_null() {
+        let err = unsafe { GetLastError() };
+        anyhow::bail!("data (variable) region VirtualAlloc returned null (GetLastError = {err})");
+    }
+    Ok(base)
+}
+
 // ── Wf64Session ──────────────────────────────────────────────────────
 
 /// `forth_main(target_xt, logical_dsp_in, rsp_top, user_base) → 0`.
@@ -1124,6 +1153,8 @@ pub struct Wf64Session {
     pub rsp_top:   u64,
     pub user_base: u64,
     pub dict_base: u64,
+    /// Base of the RW / no-execute data region (variable / create bodies).
+    var_base: u64,
     debug_meta_base: u64,
 
     /// Current "logical" data stack pointer. Equal to `dsp_top` when
@@ -1156,6 +1187,9 @@ pub struct Wf64Session {
     boot_latestxt: u64,
     boot_index_here: u64,
     boot_index_latest: u64,
+    /// Post-bootstrap data-space pointer (USER_VAR_HERE) — reset rolls the
+    /// variable region back to here, mirroring boot_here for the code region.
+    boot_var_here: u64,
     /// Snapshot of the FORTH-WORDLIST bucket array (512 × 8 bytes)
     /// taken right after bootstrap. `reset()` writes this back so that
     /// overlay nodes allocated by one test cannot leave stale bucket
@@ -1320,6 +1354,10 @@ impl Wf64Session {
         let locals_base_u64 = locals_base as u64;
         let locals_top = locals_base_u64 + LOCALS_REGION_SIZE as u64;
 
+        // Data space (variables / create bodies) — separate RW / no-execute
+        // region so writes never touch executable code (W^X, no SMC clears).
+        let var_base = alloc_var_region()? as u64;
+
         let dsp_top   = region_u64 + OFFSET_DSP_TOP;
         let rsp_top   = region_u64 + OFFSET_RSP_TOP;
         let user_base = region_u64 + OFFSET_USER_BASE;
@@ -1334,6 +1372,8 @@ impl Wf64Session {
             write_u64(up, USER_STATE_VAR,    0);
             write_u64(up, USER_LATEST_VAR,   0);                 // empty
             write_u64(up, USER_HERE_VAR,     dict_base);
+            write_u64(up, USER_VAR_HERE,     var_base);
+            write_u64(up, USER_VAR_LIMIT,    var_base + VAR_REGION_SIZE as u64);
             write_u64(up, USER_DICT_END_VAR, debug_meta_base);
             write_u64(up, USER_PARSE_BARRIER, 0);
             write_u64(up, USER_BYE_REQ,      0);
@@ -1386,6 +1426,7 @@ impl Wf64Session {
             rsp_top,
             user_base,
             dict_base,
+            var_base,
             debug_meta_base,
             current_dsp: dsp_top,
             runtime_words: Vec::new(),
@@ -1402,6 +1443,7 @@ impl Wf64Session {
             boot_latestxt: 0,
             boot_index_here: 0,
             boot_index_latest: 0,
+            boot_var_here: 0,
             boot_wl_buckets: Vec::new(),
             boot_tools_buckets: Vec::new(),
             boot_private_buckets: Vec::new(),
@@ -1447,6 +1489,10 @@ impl Wf64Session {
         session.boot_latest = session.latest();
         session.boot_latestxt = session.user_u64(USER_LATESTXT_VAR);
         session.boot_index_here = session.user_u64(USER_INDEX_HERE);
+        // Data-space pointer after core.f/oop.f — reset rolls the variable
+        // region back to here so post-bootstrap bodies survive but test bodies
+        // are reclaimed (mirrors boot_here for the code region).
+        session.boot_var_here = session.user_u64(USER_VAR_HERE);
         session.boot_index_latest = session.user_u64(USER_INDEX_LATEST);
         // Snapshot the FORTH-WORDLIST bucket array so reset() can
         // restore it. Without this, overlay nodes allocated by a test
@@ -1961,6 +2007,7 @@ impl Wf64Session {
         self.current_dsp = self.dsp_top;
         self.write_user_u64(USER_BASE_VAR,     10);
         self.write_user_u64(USER_HERE_VAR,     self.boot_here);
+        self.write_user_u64(USER_VAR_HERE,     self.boot_var_here);
         self.write_user_u64(USER_LATEST_VAR,   self.boot_latest);
         self.write_user_u64(USER_STATE_VAR,    0);
         self.write_user_u64(USER_PARSE_BARRIER, 0);
@@ -2183,6 +2230,10 @@ impl Drop for Wf64Session {
         if !self.locals_base.is_null() {
             unsafe { VirtualFree(self.locals_base, 0, MEM_RELEASE); }
             self.locals_base = ptr::null_mut();
+        }
+        if self.var_base != 0 {
+            unsafe { VirtualFree(self.var_base as *mut c_void, 0, MEM_RELEASE); }
+            self.var_base = 0;
         }
     }
 }

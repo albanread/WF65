@@ -51,17 +51,29 @@ endp()
 ;     Return the next free dictionary address.
 proc(here_word)
     mov     [DSP - cell], TOS
-    mov     TOS, [UP + user_HERE]
+    mov     TOS, [UP + user_VAR_HERE]        ; data space (RW/no-execute), not code
     stk(0, 1)
     next()
 endp()
 
 ; allot  ( n -- )
-;     Advance HERE by n bytes.
+;     Advance the data-space pointer by n bytes (variable / create bodies live
+;     in the RW/no-execute region, never in the executable dictionary).  This is
+;     the single choke point for data growth (, c, f, 2, buffer: all build on
+;     it), so bound it against user_VAR_LIMIT and THROW -8 on overflow rather
+;     than running off the 16 MB region into unmapped memory.
 proc(allot_word)
-    add     [UP + user_HERE], TOS
+    mov     rcx, [UP + user_VAR_HERE]
+    add     rcx, TOS                         ; prospective new data pointer
+    cmp     rcx, [UP + user_VAR_LIMIT]
+    ja      .overflow                        ; past the end of the RW data region
+    mov     [UP + user_VAR_HERE], rcx
     mov     TOS, [DSP]
     stk(1, 0)
+    next()
+.overflow:
+    mov     TOS, -8                          ; dictionary / data-space overflow
+    call    throw_word
     next()
 endp()
 

@@ -4599,7 +4599,10 @@ fn create_builds_a_created_word_that_pushes_its_body() {
     s.call("latestxt").unwrap();
     let xt = s.pop() as u64;
     let body = s.pop() as u64;
-    assert_eq!(body, xt + 24);
+    // The body now lives in the separate RW data region, off the executable
+    // stub entirely (W^X; no SMC). It must not sit on the stub's cache line.
+    assert!(body < xt || body >= xt + 64,
+        "create body must be off the code stub, got body={body:#x} xt={xt:#x}");
 
     s.push(xt as i64);
     s.call("to_name").unwrap();
@@ -4652,7 +4655,10 @@ fn execute_of_to_body_xt_matches_direct_call() {
     s.push(xt);
     s.push(to_body_xt);
     s.call("execute").unwrap();
-    assert_eq!(s.pop(), xt + 24);
+    let body = s.pop() as u64;
+    let xtu = xt as u64;
+    assert!(body < xtu || body >= xtu + 64,
+        "to_body result must be off the code stub, got body={body:#x} xt={xtu:#x}");
 }
 
 #[test]
@@ -4662,10 +4668,11 @@ fn eval_body_word_leaves_created_body_address_on_stack() {
     assert_eq!(out, " ok\n ok\n");
 
     s.call("latestxt").unwrap();
-    let xt = s.pop();
-    let body = s.pop();
+    let xt = s.pop() as u64;
+    let body = s.pop() as u64;
 
-    assert_eq!(body, xt + 24);
+    assert!(body < xt || body >= xt + 64,
+        "(>body) must be off the code stub, got body={body:#x} xt={xt:#x}");
 }
 
 #[test]
@@ -4675,10 +4682,11 @@ fn compiled_body_word_returns_created_body_address() {
     assert_eq!(out, " ok\n ok\n ok\n");
 
     s.call("latestxt").unwrap();
-    let xt = s.pop();
-    let body = s.pop();
+    let xt = s.pop() as u64;
+    let body = s.pop() as u64;
 
-    assert_eq!(body, xt + 24);
+    assert!(body < xt || body >= xt + 64,
+        "compiled (>body) must be off the code stub, got body={body:#x} xt={xt:#x}");
 }
 
 #[test]

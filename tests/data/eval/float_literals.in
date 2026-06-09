@@ -4,5 +4,5 @@
 fivef f>d drop .
 1. f>d drop .
 here 1+ faligned 7 and .
-here 1+ allot falign here 7 and .
+1 allot falign here 7 and .
 bye
