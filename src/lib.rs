@@ -1627,6 +1627,13 @@ impl Wf64Session {
             "two_drop" => Some("inline_leaf_comp"),
             "two_swap" => Some("inline_leaf_comp"),
             "two_over" => Some("inline_leaf_comp"),
+            // cells (shl rax,3), division (cqo;idiv — hardware-traps on /0 like
+            // the primitive), and +! (add [rax],rcx) — all branch-free leaves.
+            "cells" => Some("inline_leaf_comp"),
+            "slash" => Some("inline_leaf_comp"),
+            "mod_" => Some("inline_leaf_comp"),
+            "slash_mod" => Some("inline_leaf_comp"),
+            "plus_store" => Some("inline_leaf_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),

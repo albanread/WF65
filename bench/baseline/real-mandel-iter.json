@@ -4,20 +4,20 @@
   "corpus_file_hash": "19e0d9058ddbf6c3a96116ad9535d73a7527127bc3c33dd6d1793486dda67c6a",
   "words": {
     "mandel-iter": {
-      "byte_length": 536,
-      "call_count_E8": 27,
+      "byte_length": 579,
+      "call_count_E8": 23,
       "jmp_count_E9": 1,
       "tail_is_jmp": false,
       "do_lit_count": 8,
-      "body_hash": "8a5cc4d248bafabca06606b28d0269cd9b9744b94680d5a25862f253d2b05f59",
-      "instruction_count": 119,
-      "rbp_adjust_count": 20
+      "body_hash": "121511bfef938c0a435c4f846cf2876f665e77498689512b9e929e5f874e3929",
+      "instruction_count": 134,
+      "rbp_adjust_count": 24
     }
   },
   "file_totals": {
-    "bytes": 536,
-    "instr": 119,
-    "calls": 27,
+    "bytes": 579,
+    "instr": 134,
+    "calls": 23,
     "jmps": 1,
     "do_lit": 8
   }

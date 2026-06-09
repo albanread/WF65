@@ -24,20 +24,20 @@
       "rbp_adjust_count": 3
     },
     "bare-mem": {
-      "byte_length": 241,
-      "call_count_E8": 12,
+      "byte_length": 251,
+      "call_count_E8": 11,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 3,
-      "body_hash": "9e49ed40d788075337636b97d2b52b6eb0b63ccb40aeb62b4fe2279e25eca825",
-      "instruction_count": 55,
-      "rbp_adjust_count": 6
+      "body_hash": "c6d335e85a5f181d17fad60a15f5bcddc4c7028a72e79cf2460d78d4faf17a80",
+      "instruction_count": 58,
+      "rbp_adjust_count": 7
     }
   },
   "file_totals": {
-    "bytes": 301,
-    "instr": 72,
-    "calls": 12,
+    "bytes": 311,
+    "instr": 75,
+    "calls": 11,
     "jmps": 0,
     "do_lit": 3
   }
