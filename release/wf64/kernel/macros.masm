@@ -126,6 +126,12 @@
 @assign user_OOP_RECV_CLASS= 0x17F8  ; OOP: compile-time early-binding class hint
 @assign user_OOP_RECV_HERE = 0x1800  ; OOP: HERE just after the receiver compiled
 @assign user_OOP_IVARS_WID = 0x1808  ; OOP: wid of the per-class ivar wordlist
+@assign user_JIT_ARENA_BASE= 0x1810  ; near RWX arena for runtime CODE:/LET code
+@assign user_JIT_ARENA_SIZE= 0x1818  ; size of that arena in bytes
+@assign user_VAR_HERE      = 0x1820  ; data-space bump pointer (RW/no-execute);
+                                     ; here/, /allot/create bodies live here, NOT
+                                     ; in the executable code region (W^X)
+@assign user_VAR_LIMIT     = 0x1828  ; end of the data region
 @assign user_HEAPPTR_BASE  = 0x2000  ; first slot of the region
 @assign heapptr_region_size = 0x1000 ; 4 KB = 512 slots
 ; Compile-time literal region — parallel to HEAPPTR, used by S$"

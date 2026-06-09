@@ -206,7 +206,44 @@ proc(fold_plus_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    mov     r8, [UP + user_HERE]
+    ; T3 peephole: an inline `dup` (48 89 45 F8 48 83 ED 08) immediately before
+    ; a bare + is `dup +` == 2*TOS.  Fuse to `add rax,rax`, eliminating the
+    ; spill/reload and the paired rbp adjusts (rbp-materialization elimination).
+    cmp     byte ptr [r8 - 8], 0x48
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 7], 0x89
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 6], 0x45
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 5], 0xF8
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 4], 0x48
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 3], 0x83
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 2], 0xED
+    jne     .plus_plain
+    cmp     byte ptr [r8 - 1], 0x08
+    jne     .plus_plain
+    sub     r8, 8                            ; rewind over the inline dup
+    mov     byte ptr [r8 + 0], 0x48          ; add rax, rax
+    mov     byte ptr [r8 + 1], 0x01
+    mov     byte ptr [r8 + 2], 0xC0
+    add     r8, 3
+    jmp     .commit
+.plus_plain:
+    ; bare + (no foldable literal): inline `add rax,[rbp] ; add rbp,8`
+    mov     byte ptr [r8 + 0], 0x48          ; add rax, [rbp]
+    mov     byte ptr [r8 + 1], 0x03
+    mov     byte ptr [r8 + 2], 0x45
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 5], 0x83
+    mov     byte ptr [r8 + 6], 0xC5
+    mov     byte ptr [r8 + 7], 0x08
+    add     r8, 8
+    jmp     .commit
 endp()
 
 ; fold--,  ( xt -- )      SUB rax, imm
@@ -234,7 +271,21 @@ proc(fold_minus_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    ; bare - (no foldable literal): inline `neg rax ; add rax,[rbp] ; add rbp,8`
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; neg rax
+    mov     byte ptr [r8 + 1], 0xF7
+    mov     byte ptr [r8 + 2], 0xD8
+    mov     byte ptr [r8 + 3], 0x48          ; add rax, [rbp]
+    mov     byte ptr [r8 + 4], 0x03
+    mov     byte ptr [r8 + 5], 0x45
+    mov     byte ptr [r8 + 6], 0x00
+    mov     byte ptr [r8 + 7], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 8], 0x83
+    mov     byte ptr [r8 + 9], 0xC5
+    mov     byte ptr [r8 + 10], 0x08
+    add     r8, 11
+    jmp     .commit
 endp()
 
 ; fold-*,  ( xt -- )      IMUL rax, rax, imm  (no accumulator special form,
@@ -264,7 +315,45 @@ proc(fold_times_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    mov     r8, [UP + user_HERE]
+    ; T3 peephole: inline `dup` immediately before a bare * is `dup *` ==
+    ; TOS*TOS.  Fuse to `imul rax,rax`.
+    cmp     byte ptr [r8 - 8], 0x48
+    jne     .times_plain
+    cmp     byte ptr [r8 - 7], 0x89
+    jne     .times_plain
+    cmp     byte ptr [r8 - 6], 0x45
+    jne     .times_plain
+    cmp     byte ptr [r8 - 5], 0xF8
+    jne     .times_plain
+    cmp     byte ptr [r8 - 4], 0x48
+    jne     .times_plain
+    cmp     byte ptr [r8 - 3], 0x83
+    jne     .times_plain
+    cmp     byte ptr [r8 - 2], 0xED
+    jne     .times_plain
+    cmp     byte ptr [r8 - 1], 0x08
+    jne     .times_plain
+    sub     r8, 8                            ; rewind over the inline dup
+    mov     byte ptr [r8 + 0], 0x48          ; imul rax, rax
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xAF
+    mov     byte ptr [r8 + 3], 0xC0
+    add     r8, 4
+    jmp     .commit
+.times_plain:
+    ; bare * (no foldable literal): inline `imul rax,[rbp] ; add rbp,8`
+    mov     byte ptr [r8 + 0], 0x48          ; imul rax, [rbp]
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xAF
+    mov     byte ptr [r8 + 3], 0x45
+    mov     byte ptr [r8 + 4], 0x00
+    mov     byte ptr [r8 + 5], 0x48          ; add rbp, 8  (drop NOS)
+    mov     byte ptr [r8 + 6], 0x83
+    mov     byte ptr [r8 + 7], 0xC5
+    mov     byte ptr [r8 + 8], 0x08
+    add     r8, 9
+    jmp     .commit
 endp()
 
 ; fold-and,  ( xt -- )    AND rax, imm
@@ -292,7 +381,7 @@ proc(fold_and_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; fold-or,  ( xt -- )     OR  rax, imm
@@ -320,7 +409,7 @@ proc(fold_or_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; fold-xor,  ( xt -- )    XOR rax, imm
@@ -348,7 +437,7 @@ proc(fold_xor_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: shifts ──────────────────────────────────────
@@ -378,7 +467,7 @@ proc(fold_lshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_rshift_comp)
@@ -398,7 +487,7 @@ proc(fold_rshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_arshift_comp)
@@ -418,7 +507,7 @@ proc(fold_arshift_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: equality ────────────────────────────────────
@@ -467,7 +556,7 @@ proc(fold_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_not_equal_comp)
@@ -510,7 +599,7 @@ proc(fold_not_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: unsigned-less (cheap cmp+sbb form) ──────────
@@ -546,7 +635,7 @@ proc(fold_u_less_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; ── More literal folds: general comparisons (cmp + setCC + movzx + neg) ─
@@ -612,7 +701,7 @@ proc(fold_less_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_greater_comp)
@@ -626,7 +715,7 @@ proc(fold_greater_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_less_equal_comp)
@@ -640,7 +729,7 @@ proc(fold_less_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_greater_equal_comp)
@@ -654,7 +743,7 @@ proc(fold_greater_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_greater_comp)
@@ -668,7 +757,7 @@ proc(fold_u_greater_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_less_equal_comp)
@@ -682,7 +771,7 @@ proc(fold_u_less_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 proc(fold_u_greater_equal_comp)
@@ -696,7 +785,7 @@ proc(fold_u_greater_equal_comp)
     stk(1, 0)
     next()
 .no_fold:
-    jmp     compile_comma
+    jmp     inline_leaf_comp
 endp()
 
 ; (inline,)  ( xt -- )
@@ -826,6 +915,253 @@ proc(inline_over_comp)
     mov     byte ptr [r8 + 11], 0x08
     add     r8, 12
     mov     [UP + user_HERE], r8
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-@,  ( xt -- )
+;     Emit bare @ (fetch) inline: `mov rax, [rax]`.  No fold form (an address
+;     literal `addr @` is rare and not worth a special case); a bare @ used to
+;     compile to a 5-byte CALL.
+proc(inline_fetch_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rax, [rax]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x00
+    add     r8, 3
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-!,  ( xt -- )
+;     Emit bare ! (store) inline, mirroring proc(store):
+;       mov rcx, [rbp]      ; value = NOS
+;       mov [rax], rcx      ; *addr = value
+;       mov rax, [rbp+8]    ; raise NNOS to TOS
+;       add rbp, 16         ; drop two cells
+proc(inline_store_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov [rax], rcx
+    mov     byte ptr [r8 + 5], 0x89
+    mov     byte ptr [r8 + 6], 0x08
+    mov     byte ptr [r8 + 7], 0x48          ; mov rax, [rbp+8]
+    mov     byte ptr [r8 + 8], 0x8B
+    mov     byte ptr [r8 + 9], 0x45
+    mov     byte ptr [r8 + 10], 0x08
+    mov     byte ptr [r8 + 11], 0x48         ; add rbp, 16
+    mov     byte ptr [r8 + 12], 0x83
+    mov     byte ptr [r8 + 13], 0xC5
+    mov     byte ptr [r8 + 14], 0x10
+    add     r8, 15
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-leaf,  ( xt -- )
+;     Generic bare-op inliner used by the no-fold path of the logic / comparison
+;     / shift fold helpers.  Copies the leaf primitive body at xt — straight-line
+;     ALU/compare code, position-independent, no internal branch — up to but not
+;     including its terminating ret (0xC3), directly into the definition.  Every
+;     redirected primitive is short and contains no 0xC3 byte before its ret.
+proc(inline_leaf_comp)
+    mov     r8, [UP + user_HERE]             ; dest = HERE
+    mov     r9, rax                          ; src  = xt (primitive body start)
+.copy:
+    movzx   rcx, byte ptr [r9]
+    cmp     cl, 0xC3                         ; ret? stop (do not copy it)
+    je      .done
+    mov     [r8], cl
+    inc     r9
+    inc     r8
+    jmp     .copy
+.done:
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; (inline-var,)  ( xt -- )
+;     Compile helper installed (via hotvariable) on a hot variable so that a
+;     reference to it compiles to an INLINE push of its body address instead of
+;     a CALL into the create stub.  body = the data-region address baked into the
+;     stub's `mov rax, imm64` at xt+6 (same as proc(to_body)).  Emits:
+;         mov [rbp-8], rax        ; spill TOS
+;         sub rbp, 8              ; bump DSP
+;         mov rax, <body imm64>   ; new TOS = body address
+;     Opt-in only: the programmer tags variables that are hot in an inner loop,
+;     so the ~13-byte-larger-than-a-CALL body is paid only where it pays off.
+proc(inline_var_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov [rbp-8], rax
+    mov     byte ptr [r8 + 1], 0x89
+    mov     byte ptr [r8 + 2], 0x45
+    mov     byte ptr [r8 + 3], 0xF8
+    mov     byte ptr [r8 + 4], 0x48          ; sub rbp, 8
+    mov     byte ptr [r8 + 5], 0x83
+    mov     byte ptr [r8 + 6], 0xED
+    mov     byte ptr [r8 + 7], 0x08
+    mov     byte ptr [r8 + 8], 0x48          ; mov rax, imm64
+    mov     byte ptr [r8 + 9], 0xB8
+    mov     rcx, [rax + 6]                   ; body address = stub's baked imm64
+    mov     [r8 + 10], rcx                   ; imm64 = body address (data region)
+    add     r8, 18
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-rot,  ( xt -- )   rot ( n1 n2 n3 -- n2 n3 n1 ), mirrors proc(rot_).
+proc(inline_rot_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov rdx, [rbp+8]
+    mov     byte ptr [r8 + 5], 0x8B
+    mov     byte ptr [r8 + 6], 0x55
+    mov     byte ptr [r8 + 7], 0x08
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp], rax
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x45
+    mov     byte ptr [r8 + 11], 0x00
+    mov     byte ptr [r8 + 12], 0x48         ; mov [rbp+8], rcx
+    mov     byte ptr [r8 + 13], 0x89
+    mov     byte ptr [r8 + 14], 0x4D
+    mov     byte ptr [r8 + 15], 0x08
+    mov     byte ptr [r8 + 16], 0x48         ; mov rax, rdx
+    mov     byte ptr [r8 + 17], 0x89
+    mov     byte ptr [r8 + 18], 0xD0
+    add     r8, 19
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline--rot,  ( xt -- )   -rot ( n1 n2 n3 -- n3 n1 n2 ), mirrors proc(neg_rot).
+proc(inline_neg_rot_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp+8]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x08
+    mov     byte ptr [r8 + 4], 0x48          ; mov rdx, [rbp]
+    mov     byte ptr [r8 + 5], 0x8B
+    mov     byte ptr [r8 + 6], 0x55
+    mov     byte ptr [r8 + 7], 0x00
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp+8], rax
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x45
+    mov     byte ptr [r8 + 11], 0x08
+    mov     byte ptr [r8 + 12], 0x48         ; mov [rbp], rcx
+    mov     byte ptr [r8 + 13], 0x89
+    mov     byte ptr [r8 + 14], 0x4D
+    mov     byte ptr [r8 + 15], 0x00
+    mov     byte ptr [r8 + 16], 0x48         ; mov rax, rdx
+    mov     byte ptr [r8 + 17], 0x89
+    mov     byte ptr [r8 + 18], 0xD0
+    add     r8, 19
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-nip,  ( xt -- )    nip ( a b -- b ) = drop NOS = `add rbp, 8`.
+proc(inline_nip_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; add rbp, 8
+    mov     byte ptr [r8 + 1], 0x83
+    mov     byte ptr [r8 + 2], 0xC5
+    mov     byte ptr [r8 + 3], 0x08
+    add     r8, 4
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-tuck,  ( xt -- )   tuck ( n1 n2 -- n2 n1 n2 ), mirrors proc(tuck_).
+proc(inline_tuck_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x48          ; mov [rbp], rax
+    mov     byte ptr [r8 + 5], 0x89
+    mov     byte ptr [r8 + 6], 0x45
+    mov     byte ptr [r8 + 7], 0x00
+    mov     byte ptr [r8 + 8], 0x48          ; mov [rbp-8], rcx
+    mov     byte ptr [r8 + 9], 0x89
+    mov     byte ptr [r8 + 10], 0x4D
+    mov     byte ptr [r8 + 11], 0xF8
+    mov     byte ptr [r8 + 12], 0x48         ; sub rbp, 8
+    mov     byte ptr [r8 + 13], 0x83
+    mov     byte ptr [r8 + 14], 0xED
+    mov     byte ptr [r8 + 15], 0x08
+    add     r8, 16
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-c@,  ( xt -- )     c@ ( addr -- byte ) = `movzx rax, byte ptr [rax]`.
+proc(inline_c_fetch_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; movzx rax, byte ptr [rax]
+    mov     byte ptr [r8 + 1], 0x0F
+    mov     byte ptr [r8 + 2], 0xB6
+    mov     byte ptr [r8 + 3], 0x00
+    add     r8, 4
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
+; inline-c!,  ( xt -- )     c! ( byte addr -- ), mirrors proc(c_store).
+proc(inline_c_store_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov rcx, [rbp]
+    mov     byte ptr [r8 + 1], 0x8B
+    mov     byte ptr [r8 + 2], 0x4D
+    mov     byte ptr [r8 + 3], 0x00
+    mov     byte ptr [r8 + 4], 0x88          ; mov [rax], cl
+    mov     byte ptr [r8 + 5], 0x08
+    mov     byte ptr [r8 + 6], 0x48          ; mov rax, [rbp+8]
+    mov     byte ptr [r8 + 7], 0x8B
+    mov     byte ptr [r8 + 8], 0x45
+    mov     byte ptr [r8 + 9], 0x08
+    mov     byte ptr [r8 + 10], 0x48         ; add rbp, 16
+    mov     byte ptr [r8 + 11], 0x83
+    mov     byte ptr [r8 + 12], 0xC5
+    mov     byte ptr [r8 + 13], 0x10
+    add     r8, 14
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
     mov     TOS, [DSP]
     stk(1, 0)
     next()
@@ -2273,8 +2609,8 @@ proc(create_word)
     mov     r8, [UP + user_LATEST]
     mov     byte ptr [r8 + dh_tfa], tfa_tcre
 
-    mov     r9, [UP + user_HERE]             ; xt
-    lea     r10, [r9 + create_stub_size]     ; body address
+    mov     r9, [UP + user_HERE]             ; xt (stub location, code region)
+    mov     r10, [UP + user_VAR_HERE]        ; body address (RW data region)
 
     ; mov [rbp-8], rax
     mov     byte ptr [r9 + 0], 0x48
@@ -2292,11 +2628,14 @@ proc(create_word)
     mov     byte ptr [r9 + 17], 0x08
     ; ret
     mov     byte ptr [r9 + 18], 0xC3
-    ; Clear the padding bytes so the body starts from known contents.
+    ; Clear the stub padding bytes (code region; never executed past the ret).
     mov     dword ptr [r9 + 19], 0
     mov     byte ptr [r9 + 23], 0
 
-    mov     [UP + user_HERE], r10
+    ; Code-here advances past the stub only; the body lives in the data region
+    ; (user_VAR_HERE), grown by the following , / allot.
+    lea     r11, [r9 + create_stub_size]
+    mov     [UP + user_HERE], r11
     mov     [UP + user_LATESTXT], r9
     next()
 endp()
@@ -2362,20 +2701,19 @@ proc(code_colon_word)
     mov     r8, [UP + user_LATEST]
     mov     byte ptr [r8 + dh_tfa], tfa_tcol
 
-    ; Emit trampoline: mov rcx, imm64 ; jmp rcx  (12 bytes).  We use
-    ; rcx, not rax, because rax holds the user's TOS at the moment the
-    ; trampoline is entered — clobbering it would silently destroy the
-    ; caller's input value.  rcx is caller-saved and the interpreter
-    ; only puts xt there before jumping in, so we can safely overwrite.
-    mov     rcx, [UP + user_PAD + 8]         ; fn_addr
-    mov     r8,  [UP + user_HERE]
-    mov     byte ptr [r8 + 0], 0x48
-    mov     byte ptr [r8 + 1], 0xB9          ; mov rcx, imm64
-    mov     [r8 + 2], rcx                    ; the 8-byte fn_addr
-    mov     byte ptr [r8 + 10], 0xFF         ; jmp rcx
-    mov     byte ptr [r8 + 11], 0xE1
-    add     r8, 12
-    mov     [UP + user_HERE], r8
+    ; The body is real near-arena code: rt_code_compile_body assembled it
+    ; into our near code arena and left fn_addr in user_PAD+8.  Point the
+    ; word's xt straight at it — a plain `call rel32` reaches it, so there
+    ; is no body, no copy, and no far-segment trampoline.  Then write the
+    ; xt back-offset into the arena's reserved header cell at
+    ; [fn_addr - cell], exactly like a boot-time primitive, so >ct / >name
+    ; recover the header from the xt.
+    mov     r10, [UP + user_PAD + 8]         ; r10 = fn_addr (near)
+    mov     [r8 + dh_xtptr], r10             ; dh_xtptr = fn_addr
+    mov     [UP + user_LATESTXT], r10        ; latestxt = fn_addr
+    lea     r9, [r8 + dh_ct]                 ; &dh_ct
+    sub     r9, r10                          ; back-offset = &dh_ct - fn_addr
+    mov     [r10 - cell], r9                 ; store at [fn_addr - cell]
     next()
 
 .compile_error:

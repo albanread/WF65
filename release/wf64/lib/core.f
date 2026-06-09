@@ -96,9 +96,9 @@ variable hld
  
 ' (comp-val) compiles-me
  
-: defer@ ( xt -- xt' ) dup >name tfa@ 145 = if 24 + @ else drop -31 throw then ;
+: defer@ ( xt -- xt' ) dup >name tfa@ 145 = if >body @ else drop -31 throw then ;
  
-: defer! ( xt' xt -- ) dup >name tfa@ 145 = if 24 + ! else drop -31 throw then ;
+: defer! ( xt' xt -- ) dup >name tfa@ 145 = if >body ! else drop -31 throw then ;
  
 : defer-err -261 throw ;
  
@@ -716,13 +716,22 @@ forth-wordlist set-current
 
 : inline  ( -- )
     base 16 + @                              ( latest )
-    here over 16 + @ - 1-                    ( latest length )  \ HERE - xt - 1
+    base 24 + @ over 16 + @ - 1-             ( latest length )  \ code-HERE - xt - 1
     over 16 + @ over (inline-leaf?) 0= if    ( latest length )  \ non-leaf?
         drop 0                               ( latest 0 )        \ refuse -> CALL
     then
     dup $FFFF u> if drop 0 then              ( latest length )  \ clamp; 0 == disable
     over 42 + w!                              ( latest )          \ store dh_ofa
     ['] (inline,) swap 24 + ! ;              ( )                 \ store dh_comp
+
+\ hotvariable  ( "name" -- )   Define a variable whose REFERENCES compile to an
+\ inline push of its body address (mov [rbp-8],rax; sub rbp,8; mov rax,imm64)
+\ instead of a CALL into the create stub.  Opt-in: use for variables that are
+\ hot in an inner loop.  Costs ~13 bytes more than a CALL per reference, so an
+\ untagged `variable` stays the cheaper CALL — the human picks which are hot.
+: hotvariable  ( "name" -- )
+    create 0 ,                               \ same body cell as `variable`
+    base 16 + @  ['] (inline-var,) swap 24 + ! ;   \ latest dh_comp := (inline-var,)
 
 \ >FLOAT — string to float. Built on the kernel's float? primitive.
 \ float? returns ( -1 ) on success (consumed addr/u, pushed r onto FP),
@@ -894,9 +903,10 @@ forth-wordlist set-current
 
 \ ── More Core-ext / utility words ─────────────────────────────────────────
 
-\ UNUSED ( -- u )    bytes available in the dictionary heap.
-\ user_DICT_END = 0x20 (32), user_HERE = 0x18 (24); base returns UP.
-: unused  ( -- u )  base 32 + @  here - ;
+\ UNUSED ( -- u )    bytes free in the data (variable) space.
+\ here / , / allot now live in the RW data region, so report against its limit:
+\ user_VAR_LIMIT = 0x1828 (6184); `here` returns user_VAR_HERE.  base returns UP.
+: unused  ( -- u )  base 6184 + @  here - ;
 
 \ M+ ( d n -- d' )    add a single to a double.
 : m+  ( d n -- d' )  s>d d+ ;
@@ -925,11 +935,12 @@ forth-wordlist set-current
 \ user_HERE = 0x18 = 24, user_LATEST = 0x10 = 16 (base = UP).
 tools-wordlist set-current
 : marker  ( "name" -- )
-    base 24 + @  base 16 + @         \ snapshot ( here-before latest-before )
-    create swap , ,
+    base 16 + @  base 24 + @  base 6176 + @    \ ( latest here var-here )  6176 = user_VAR_HERE
+    create , , ,                                \ body: [var-here][here][latest]
     does>
-        dup @ base 24 + !            \ restore HERE
-        cell+ @ base 16 + !          \ restore LATEST
+        dup        @ base 6176 + !              \ restore VAR_HERE (data space)
+        dup cell+  @ base 24 + !                \ restore HERE     (code space)
+        2 cells +  @ base 16 + !                \ restore LATEST
 ;
 forth-wordlist set-current
 

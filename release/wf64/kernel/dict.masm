@@ -391,7 +391,9 @@ proc(to_body)
     lea     r8, [TOS + rcx]                  ; r8 = ct
     cmp     byte ptr [r8 + dh_tfa - dh_ct], tfa_tcre
     jne     .unsupported
-    add     TOS, create_stub_size
+    mov     TOS, [TOS + 6]                   ; body = address baked into the stub's
+                                             ; `mov rax, imm64` (now in the data
+                                             ; region), not xt + create_stub_size
     next()
 
 .unsupported:
@@ -488,6 +490,17 @@ proc(forget_last_word)
     mov     [UP + user_INDEX_HERE], r10
 
 .remove_header_only:
+
+    ; Reclaim the data-space body (strict LIFO). For a CREATE-flavoured word the
+    ; body imm64 baked at xt+6 is the user_VAR_HERE captured at creation, so
+    ; rewinding VAR_HERE to it frees this body and anything allotted after it.
+    ; Colon words have no data body — leave VAR_HERE untouched.
+    cmp     byte ptr [rdi + dh_tfa], tfa_tcre
+    jne     .no_var_reclaim
+    mov     r9, [rdi + dh_xtptr]            ; xt
+    mov     r9, [r9 + 6]                    ; body address (stub imm64)
+    mov     [UP + user_VAR_HERE], r9
+.no_var_reclaim:
 
     mov     rcx, [rdi + dh_link]
     mov     [UP + user_HERE], rdi
