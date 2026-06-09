@@ -54,12 +54,12 @@
       "rbp_adjust_count": 2
     },
     "swap-step": {
-      "byte_length": 70,
-      "call_count_E8": 1,
+      "byte_length": 69,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "e9af185ff2238fe3c8f782135908f682dd18434b067e2838922551cff5d75f5c",
+      "body_hash": "0dd5e26b0978631fea236497a5c15035a34f2151429d9c920e0def9826fe231f",
       "instruction_count": 19,
       "rbp_adjust_count": 2
     },
@@ -75,9 +75,9 @@
     }
   },
   "file_totals": {
-    "bytes": 474,
+    "bytes": 473,
     "instr": 112,
-    "calls": 12,
+    "calls": 11,
     "jmps": 0,
     "do_lit": 6
   }

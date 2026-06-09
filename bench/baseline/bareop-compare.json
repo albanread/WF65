@@ -4,34 +4,34 @@
   "corpus_file_hash": "c417589954a46a4ba059a9bb927835f27638595e25a27bf45be39f37a9b0c67c",
   "words": {
     "cmp-chain": {
-      "byte_length": 150,
-      "call_count_E8": 4,
+      "byte_length": 186,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "1fe1beba646b97dd74c1164b1b357f693270a2bbc9cecf774734af0015f61d39",
-      "instruction_count": 43,
-      "rbp_adjust_count": 11
+      "body_hash": "7c51b31058c9d3a20f315ad3599055441b85d9b874521737ad4d2f207cccfe24",
+      "instruction_count": 53,
+      "rbp_adjust_count": 15
     },
     "logic-chain": {
-      "byte_length": 115,
-      "call_count_E8": 4,
+      "byte_length": 151,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "600af5cd54218734c7226dff458d00e05a0fcdddecf8afd2e2b16f33beef5dea",
-      "instruction_count": 33,
-      "rbp_adjust_count": 11
+      "body_hash": "c8a0546fe69b62b842a79147b9370653665e268a6c9cbcf1cbc0436e49abc977",
+      "instruction_count": 43,
+      "rbp_adjust_count": 15
     },
     "shift-chain": {
-      "byte_length": 137,
-      "call_count_E8": 4,
+      "byte_length": 173,
+      "call_count_E8": 0,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "ee0d8836e75c35f18e6e453c8dbe5cfb27cc8b77e66c3657f192b780e40f1f7d",
-      "instruction_count": 40,
-      "rbp_adjust_count": 11
+      "body_hash": "1bef2778e5b45fc7de75e6609bbd5c2a112725fc64ae4d51a1a825bdfde962b3",
+      "instruction_count": 50,
+      "rbp_adjust_count": 15
     },
     "zero-chain": {
       "byte_length": 80,
@@ -45,9 +45,9 @@
     }
   },
   "file_totals": {
-    "bytes": 482,
-    "instr": 140,
-    "calls": 12,
+    "bytes": 590,
+    "instr": 170,
+    "calls": 0,
     "jmps": 0,
     "do_lit": 0
   }

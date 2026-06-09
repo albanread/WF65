@@ -14,22 +14,22 @@
       "rbp_adjust_count": 7
     },
     "dp-setup": {
-      "byte_length": 225,
-      "call_count_E8": 8,
+      "byte_length": 223,
+      "call_count_E8": 6,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 1,
-      "body_hash": "acb171f99584ce01abe0cf7e44ded0ca012954d0bbfb239f75b77ce3ffd2d023",
+      "body_hash": "9bc48926dc31fb29a01d823a876212541771805327243526ce9f9da51d6a7c5f",
       "instruction_count": 53,
       "rbp_adjust_count": 9
     },
     "fact": {
-      "byte_length": 66,
-      "call_count_E8": 2,
+      "byte_length": 65,
+      "call_count_E8": 1,
       "jmp_count_E9": 0,
       "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "78a8debb4ba1c436e6dae836cb912d27fd0ccce32a44ee0fc9c1476bed057cac",
+      "body_hash": "a0c1903cfb7e31e599c4e0a13798bb4702b7f4a0acfd09cbc34363056aa85686",
       "instruction_count": 17,
       "rbp_adjust_count": 4
     },
@@ -55,9 +55,9 @@
     }
   },
   "file_totals": {
-    "bytes": 748,
+    "bytes": 745,
     "instr": 174,
-    "calls": 24,
+    "calls": 21,
     "jmps": 0,
     "do_lit": 6
   }

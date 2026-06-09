@@ -1614,6 +1614,19 @@ impl Wf64Session {
             // Unary zero-compares: copy the (leaf) primitive body inline.
             "zero_equal" => Some("inline_leaf_comp"),
             "zero_less" => Some("inline_leaf_comp"),
+            // Unary arithmetic: single-instruction leaf bodies.
+            "one_plus" => Some("inline_leaf_comp"),
+            "one_minus" => Some("inline_leaf_comp"),
+            "negate" => Some("inline_leaf_comp"),
+            "two_times" => Some("inline_leaf_comp"),
+            "two_slash" => Some("inline_leaf_comp"),
+            "invert" => Some("inline_leaf_comp"),
+            // Double-cell stack ops: branch-free leaf bodies (2swap's
+            // xchg-rbp,rsp / push-pop trick is self-contained).
+            "two_dup" => Some("inline_leaf_comp"),
+            "two_drop" => Some("inline_leaf_comp"),
+            "two_swap" => Some("inline_leaf_comp"),
+            "two_over" => Some("inline_leaf_comp"),
             "to_r" => Some("inline_to_r_comp"),
             "r_from" => Some("inline_r_from_comp"),
             "r_fetch" => Some("inline_r_fetch_comp"),

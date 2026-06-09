@@ -14,12 +14,12 @@
       "rbp_adjust_count": 1
     },
     "fold-chain": {
-      "byte_length": 41,
-      "call_count_E8": 7,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "byte_length": 33,
+      "call_count_E8": 0,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "25e4ac0295ef1768c02fdb0de3f8b44ae368d8a4b303bbe23ac6c80aded9dec7",
+      "body_hash": "c9bc3824bd36a2e943cd083234f87885a67a9c859341824df1300bfd339ccc19",
       "instruction_count": 9,
       "rbp_adjust_count": 0
     },
@@ -45,10 +45,10 @@
     }
   },
   "file_totals": {
-    "bytes": 210,
+    "bytes": 202,
     "instr": 53,
-    "calls": 11,
-    "jmps": 1,
+    "calls": 4,
+    "jmps": 0,
     "do_lit": 0
   }
 }

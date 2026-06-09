@@ -4,22 +4,22 @@
   "corpus_file_hash": "4897dc86922ba14e5bffac0fb543e41870b58559d508e2ac7d6e6b2ab5457695",
   "words": {
     "bump": {
-      "byte_length": 6,
+      "byte_length": 5,
       "call_count_E8": 0,
-      "jmp_count_E9": 1,
-      "tail_is_jmp": true,
+      "jmp_count_E9": 0,
+      "tail_is_jmp": false,
       "do_lit_count": 0,
-      "body_hash": "69827dbe0b041f3d9813fbe5ae72a5db791f866df98541de3befef4ed8a6466f",
+      "body_hash": "115f4ba91382f27e9f1b8fe7633dedbcfa051c336d1eb3ef905c9c144a423da6",
       "instruction_count": 2,
       "rbp_adjust_count": 0
     },
     "countdown": {
-      "byte_length": 44,
-      "call_count_E8": 1,
+      "byte_length": 43,
+      "call_count_E8": 0,
       "jmp_count_E9": 1,
       "tail_is_jmp": true,
       "do_lit_count": 0,
-      "body_hash": "297f7b2cd7daf0804a1c55c7fbcb465f9759f7f91b66cc5666f2a13b5364acde",
+      "body_hash": "3a7338bb12acc9caad2fe1055895b9ed82dd48371f65990b5156391aeb5507ed",
       "instruction_count": 12,
       "rbp_adjust_count": 2
     },
@@ -55,10 +55,10 @@
     }
   },
   "file_totals": {
-    "bytes": 73,
+    "bytes": 71,
     "instr": 21,
-    "calls": 2,
-    "jmps": 5,
+    "calls": 1,
+    "jmps": 4,
     "do_lit": 0
   }
 }
