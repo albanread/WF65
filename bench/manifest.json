@@ -21,6 +21,8 @@
     "shift-chain": { "file": "bareop-compare.f",    "transform": 2, "arg": "255 3",      "iterations": 200000, "verdict": true },
     "zero-chain":  { "file": "bareop-compare.f",    "transform": 2, "arg": "-7",         "iterations": 200000, "verdict": true },
     "minmax":      { "file": "bareop-compare.f",    "transform": 2, "arg": "3 9",        "iterations": 200000, "verdict": true },
-    "absval":      { "file": "bareop-compare.f",    "transform": 2, "arg": "-5",         "iterations": 200000, "verdict": true }
+    "absval":      { "file": "bareop-compare.f",    "transform": 2, "arg": "-5",         "iterations": 200000, "verdict": true },
+    "cold-sum":    { "file": "hotvar.f",            "transform": 7, "arg": "64",         "iterations": 100000, "verdict": true },
+    "hot-sum":     { "file": "hotvar.f",            "transform": 7, "arg": "64",         "iterations": 100000, "verdict": true }
   }
 }

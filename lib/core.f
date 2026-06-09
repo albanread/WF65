@@ -724,6 +724,15 @@ forth-wordlist set-current
     over 42 + w!                              ( latest )          \ store dh_ofa
     ['] (inline,) swap 24 + ! ;              ( )                 \ store dh_comp
 
+\ hotvariable  ( "name" -- )   Define a variable whose REFERENCES compile to an
+\ inline push of its body address (mov [rbp-8],rax; sub rbp,8; mov rax,imm64)
+\ instead of a CALL into the create stub.  Opt-in: use for variables that are
+\ hot in an inner loop.  Costs ~13 bytes more than a CALL per reference, so an
+\ untagged `variable` stays the cheaper CALL — the human picks which are hot.
+: hotvariable  ( "name" -- )
+    create 0 ,                               \ same body cell as `variable`
+    base 16 + @  ['] (inline-var,) swap 24 + ! ;   \ latest dh_comp := (inline-var,)
+
 \ >FLOAT — string to float. Built on the kernel's float? primitive.
 \ float? returns ( -1 ) on success (consumed addr/u, pushed r onto FP),
 \ or ( c-addr u 0 ) on failure.

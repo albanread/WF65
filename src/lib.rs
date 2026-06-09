@@ -518,6 +518,7 @@ pub const PRIMITIVES: &[(&str, &str, u8)] = &[
     ("check-local-emit", "check_local_emit_word",  0),
     ("check-local-store","check_local_store_word", 0),
     ("(inline,)",      "inline_comma_word",       0),
+    ("(inline-var,)",  "inline_var_comp",         0),
     // Parse & dict
     ("evaluate",   "evaluate_word", 0),
     ("parse-name", "parse_name", 0),

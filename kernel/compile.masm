@@ -993,6 +993,38 @@ proc(inline_leaf_comp)
     next()
 endp()
 
+; (inline-var,)  ( xt -- )
+;     Compile helper installed (via hotvariable) on a hot variable so that a
+;     reference to it compiles to an INLINE push of its body address instead of
+;     a CALL into the create stub.  body = xt + create_stub_size (see
+;     proc(to_body)).  Emits:
+;         mov [rbp-8], rax        ; spill TOS
+;         sub rbp, 8              ; bump DSP
+;         mov rax, <body imm64>   ; new TOS = body address
+;     Opt-in only: the programmer tags variables that are hot in an inner loop,
+;     so the ~13-byte-larger-than-a-CALL body is paid only where it pays off.
+proc(inline_var_comp)
+    mov     r8, [UP + user_HERE]
+    mov     byte ptr [r8 + 0], 0x48          ; mov [rbp-8], rax
+    mov     byte ptr [r8 + 1], 0x89
+    mov     byte ptr [r8 + 2], 0x45
+    mov     byte ptr [r8 + 3], 0xF8
+    mov     byte ptr [r8 + 4], 0x48          ; sub rbp, 8
+    mov     byte ptr [r8 + 5], 0x83
+    mov     byte ptr [r8 + 6], 0xED
+    mov     byte ptr [r8 + 7], 0x08
+    mov     byte ptr [r8 + 8], 0x48          ; mov rax, imm64
+    mov     byte ptr [r8 + 9], 0xB8
+    lea     rcx, [rax + create_stub_size]    ; rcx = body address
+    mov     [r8 + 10], rcx                   ; imm64 = body address
+    add     r8, 18
+    mov     [UP + user_HERE], r8
+    mov     qword ptr [UP + user_TAIL_CALL], 0
+    mov     TOS, [DSP]
+    stk(1, 0)
+    next()
+endp()
+
 ; inline-rot,  ( xt -- )   rot ( n1 n2 n3 -- n2 n3 n1 ), mirrors proc(rot_).
 proc(inline_rot_comp)
     mov     r8, [UP + user_HERE]
