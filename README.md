@@ -1,6 +1,19 @@
-# WF64
+# WF65
 
-A Forth in LLVM/custom MASM — under development.
+A Forth in custom MASM — under development.
+
+So this started as WF64 which is a rust/mc/llvm macro assembler implementation of Forth.
+
+This version has kept the rust shell, and the MASM is now written in Rust, and is very specific to the instructions Forth uses.
+
+So this is a fairly ordinary Forth, except it is wrapped in an assembler and always loads from source.
+
+
+
+
+
+
+---
 
 
 This is an application-level Forth rather than an embedded-systems Forth, aimed at writing Windows programs.
@@ -10,8 +23,6 @@ Like my other compilers, exe generation is not a priority; native code generatio
 It's open source, so it's nice to just change it and run, without compile/link/crash/repeat rituals.
 
 In theory, as a compiler, it can also be adapted to emit an exe — but it would lose features.
-
-LLVM is used in the core. After Forth is built, the Forth compiler itself does not use LLVM.
 
 The Forth compiler here is based on the WF32 STC compiler.
 
