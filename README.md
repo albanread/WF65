@@ -8,7 +8,7 @@ This version has kept the rust shell, and the MASM is now written in Rust, and i
 
 So this is a fairly ordinary Forth, except it is wrapped in an assembler and always loads from source.
 
-
+From WF32 (one of my favourite Forths) the goldmine is obvious: WF32 `src/optinline.fs` and  WF32 `src/optliterals32.fs` — are the direct ancestors of the inline-helper and literal-folder here. 
 
 
 
