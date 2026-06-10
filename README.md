@@ -74,8 +74,7 @@ This is a conventional Forth, up to the first escape hatch — `CODE` — which 
 primitives using the same macro assembler the kernel uses.
 
 After that the LET infix operator is a dense floating-point expression evaluator. Its main purpose is
-to make the floating-point code shorter and easier to read; emitting register-allocated SSE that LLVM
-or libm could plausibly produce is the side benefit.
+to make the floating-point code shorter and easier to read; and generate dense code.
 
 The paged GC, is my own GC that I also use with Lisp, Dylan etc this gives us a managed heap for data.
 It creates data outside the dictionary for us.
