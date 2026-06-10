@@ -42,16 +42,16 @@ The WF32 primitives and STC compiler are the starting point; on top of that we o
 This does lead to some layers
 
 ----------------------------------------
-MASM kernel - assembly language
+Rust MASM kernel - assembly language
 Can invoke windows API also
 ----------------------------------------
 ANSI Forth Core, some MASM, some high level
 ----------------------------------------
 ANSI Forth in Forth
 ----------------------------------------
-Escape hatch - CODE uses MASM
+Escape hatch - CODE uses Rust ASM
 ----------------------------------------
-Escape hatch - LET infix expressions
+Escape hatch - LET infix expressions 
 ----------------------------------------
 Paged garbage collector
 ----------------------------------------
@@ -76,9 +76,9 @@ or libm could plausibly produce is the side benefit.
 The paged GC, is my own GC that I also use with Lisp, Dylan etc this gives us a managed heap for data.
 It creates data outside the dictionary for us.
 
-The GC allows us to add New strings, which is a powerful dynamic strings library.
+The GC allows us to add the 'New strings', which is a powerful dynamic strings library.
 
 The way I look at this is, its normal FORTH with extensions, similar to my other compilers.
 
-
+The extensions 'fix' floats, and 'fix' strings, and thats about it.
 
